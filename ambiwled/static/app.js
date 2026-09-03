@@ -200,18 +200,31 @@ function wireConfirmDialog() {
 /* ---------- edges (front/left/right/back canonical slots) ---------- */
 
 function edgeBySlot(slot) { return cfg.mapping.edges.find((e) => e.name === slot); }
-function presentSlots() { return SLOTS.filter((s) => edgeBySlot(s)); }
+/** Present sides, in *wiring* order - the order they actually sit in
+    cfg.mapping.edges, which is what determines each one's pixel_start.
+    Not the fixed front/left/right/back constant: which side's strip your
+    controller's data line reaches first depends on the install, not on
+    this list. */
+function presentSlots() {
+  return cfg.mapping.edges.map((e) => e.name).filter((n) => SLOTS.includes(n));
+}
 
 function repack() {
   let cursor = 0;
-  for (const slot of SLOTS) {
-    const e = edgeBySlot(slot);
-    if (!e) continue;
+  for (const e of cfg.mapping.edges) {
     e.pixel_start = cursor;
     cursor += Math.max(1, e.pixel_count | 0);
   }
-  cfg.mapping.edges.sort((a, b) => SLOTS.indexOf(a.name) - SLOTS.indexOf(b.name));
   cfg.led.count = cursor;
+}
+function moveEdge(slot, dir) {
+  const edges = cfg.mapping.edges;
+  const i = edges.findIndex((e) => e.name === slot);
+  const j = i + dir;
+  if (i < 0 || j < 0 || j >= edges.length) return;
+  [edges[i], edges[j]] = [edges[j], edges[i]];
+  repack();
+  pushEdges();
 }
 function pushEdges(immediate) {
   pushConfig({ mapping: { edges: cfg.mapping.edges }, led: { count: cfg.led.count } }, immediate !== false);
@@ -707,18 +720,23 @@ function renderTotalLabel() {
   const s1 = $('#sides-summary'), t1 = $('#total-label');
   if (s1) s1.textContent = presentSlots().length === 1 ? 'One run of strip. Everything else stays dark.'
     : `${presentSlots().length} sides · ${presentSlots().map((s) => SLOT_LABEL[s]).join(' · ')}`;
-  if (t1) t1.textContent = `${total} LEDs, packed head to tail in this order — no gaps possible.`;
+  if (t1) t1.textContent = `${total} LEDs, packed head to tail in this order — no gaps possible. `
+    + 'Use ↑↓ on a card below to match the order your strip is actually wired in.';
 }
 function renderEdgeRows() {
   const box = $('#edge-rows');
   box.innerHTML = '';
-  for (const slot of presentSlots()) {
+  const slots = presentSlots();
+  slots.forEach((slot, i) => {
     const e = edgeBySlot(slot);
     const live = e.source !== 'off';
     const card = el('div', { class: 'edge-card' },
       el('div', { class: 'head' },
         el('span', { class: 'dot', style: `background:${SLOT_COLOUR[slot]};box-shadow:0 0 9px ${SLOT_COLOUR[slot]}` }),
         el('span', { class: 'name' }, SLOT_LABEL[slot]),
+        el('div', { class: 'reorder', style: 'display:flex;gap:4px' },
+          el('button', { class: 'round-btn', style: `width:34px;height:34px;font-size:14px;${i === 0 ? 'opacity:.3' : ''}`, disabled: i === 0, onclick: () => { moveEdge(slot, -1); renderPage(); } }, '↑'),
+          el('button', { class: 'round-btn', style: `width:34px;height:34px;font-size:14px;${i === slots.length - 1 ? 'opacity:.3' : ''}`, disabled: i === slots.length - 1, onclick: () => { moveEdge(slot, 1); renderPage(); } }, '↓')),
         el('button', { class: 'pill-btn', onclick: () => flashSlot(slot) }, 'Identify')),
       el('div', { class: 'edge-row' },
         el('span', { class: 'label' }, `LEDs · from ${e.pixel_start}`),
@@ -760,7 +778,7 @@ function renderEdgeRows() {
         () => pct,
         (p) => { const v = (p / 100) * 2; $(`#trim-label-${slot}`).textContent = v.toFixed(2) + '×'; editEdge(slot, { brightness: v }); });
     }
-  }
+  });
 }
 
 /* -- Output -- */
@@ -1174,7 +1192,7 @@ function renderWizard() {
 
   if (wiz.step === 0) body.append(wizFindTv());
   else if (wiz.step === 1) body.append(wizFindLights());
-  else if (wiz.step === 2) body.append(wizSides());
+  else if (wiz.step === 2) { body.append(wizSides()); renderWizOrderList(); }
   else if (wiz.step === 3) body.append(wizCount(activeSlot));
   else if (wiz.step === 4) {
     body.append(wizPlace());
@@ -1235,9 +1253,31 @@ function wizSides() {
     }, el('span', { class: 'dot', style: present ? `background:${SLOT_COLOUR[slot]};box-shadow:0 0 9px ${SLOT_COLOUR[slot]}` : '' }),
        el('span', { class: 'name' }, SLOT_LABEL[slot])));
   }
-  return el('div', { style: 'display:flex;flex-direction:column;gap:10px' }, box,
-    el('div', { class: 'field-hint' }, presentSlots().length === 1 ? 'One run of strip. Everything else stays dark.'
-      : `${presentSlots().length} sides · ${presentSlots().map((s) => SLOT_LABEL[s]).join(' · ')}`));
+  const slots = presentSlots();
+  const wrap = el('div', { style: 'display:flex;flex-direction:column;gap:10px' }, box,
+    el('div', { class: 'field-hint' }, slots.length === 1 ? 'One run of strip. Everything else stays dark.'
+      : `${slots.length} sides selected.`));
+  if (slots.length > 1) {
+    wrap.append(
+      el('div', { class: 'field-hint' }, "Now put them in wiring order — the order your strip's data cable actually reaches them, starting from the controller. This decides each side's start pixel."),
+      el('div', { id: 'wiz-order-list', style: 'display:flex;flex-direction:column;gap:8px' }),
+    );
+  }
+  return wrap;
+}
+function renderWizOrderList() {
+  const list = $('#wiz-order-list');
+  if (!list) return;
+  const slots = presentSlots();
+  list.innerHTML = '';
+  slots.forEach((slot, i) => {
+    list.append(el('div', { class: 'side-btn active', style: 'cursor:default' },
+      el('span', { class: 'dot', style: `background:${SLOT_COLOUR[slot]};box-shadow:0 0 9px ${SLOT_COLOUR[slot]}` }),
+      el('span', { class: 'name' }, `${i + 1}. ${SLOT_LABEL[slot]}`),
+      el('div', { style: 'display:flex;gap:4px' },
+        el('button', { class: 'round-btn', style: `width:34px;height:34px;font-size:14px;${i === 0 ? 'opacity:.3' : ''}`, disabled: i === 0, onclick: (ev) => { ev.stopPropagation(); moveEdge(slot, -1); renderWizard(); } }, '↑'),
+        el('button', { class: 'round-btn', style: `width:34px;height:34px;font-size:14px;${i === slots.length - 1 ? 'opacity:.3' : ''}`, disabled: i === slots.length - 1, onclick: (ev) => { ev.stopPropagation(); moveEdge(slot, 1); renderWizard(); } }, '↓'))));
+  });
 }
 function wizCount(slot) {
   const e = edgeBySlot(slot);
