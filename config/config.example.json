@@ -1,0 +1,129 @@
+{
+  "version": 1,
+  "log_level": "INFO",
+  "mode": "ambilight",
+  "preset_slot": 0,
+  "source": {
+    "tv_ip": "",
+    "port": 1925,
+    "api_version": null,
+    "endpoint": "processed",
+    "poll_hz": 20.0,
+    "request_timeout_s": 1.0,
+    "fail_threshold": 3,
+    "off_probe_interval_s": 5.0,
+    "adaptive_backoff": true,
+    "ambilight_power_check_s": 3.0
+  },
+  "led": {
+    "count": 462
+  },
+  "mapping": {
+    "corner_blend": true,
+    "edges": [
+      {
+        "name": "tv_wall",
+        "pixel_start": 0,
+        "pixel_count": 133,
+        "source": "top",
+        "source_reversed": false,
+        "output_reversed": false,
+        "brightness": 1.0
+      },
+      {
+        "name": "right_side",
+        "pixel_start": 133,
+        "pixel_count": 98,
+        "source": "right",
+        "source_reversed": false,
+        "output_reversed": false,
+        "brightness": 1.0
+      },
+      {
+        "name": "rear",
+        "pixel_start": 231,
+        "pixel_count": 133,
+        "source": "synth_gradient",
+        "synth_from": [
+          "right",
+          -1
+        ],
+        "synth_to": [
+          "left",
+          0
+        ],
+        "mirror_of": "tv_wall",
+        "source_reversed": false,
+        "output_reversed": false,
+        "brightness": 1.0
+      },
+      {
+        "name": "left_side",
+        "pixel_start": 364,
+        "pixel_count": 98,
+        "source": "left",
+        "source_reversed": false,
+        "output_reversed": false,
+        "brightness": 1.0
+      }
+    ]
+  },
+  "colour": {
+    "saturation": 1.0,
+    "brightness": 1.0,
+    "perceptual_brightness": true,
+    "perceptual_gamma": 2.2,
+    "gamma": 1.0,
+    "black_floor": 0
+  },
+  "dimming": {
+    "enabled": false,
+    "latitude": 0.0,
+    "longitude": 0.0,
+    "day_level": 1.0,
+    "night_level": 0.4,
+    "curve_exponent": 1.0,
+    "sunrise_offset_minutes": 0.0,
+    "sunset_offset_minutes": 0.0
+  },
+  "frames": {
+    "mode": "smoothing",
+    "output_fps": 60.0,
+    "tau_ms": 80.0,
+    "adaptive_alpha": true,
+    "cut_threshold": 100.0
+  },
+  "output": {
+    "timeout_s": 2,
+    "require_online": true,
+    "presence_check_s": 10.0,
+    "presence_timeout_s": 2.0,
+    "presence_fail_threshold": 2,
+    "targets": [
+      {
+        "host": "",
+        "port": 21324,
+        "http_port": 80,
+        "pixel_offset": 0,
+        "pixel_count": 462,
+        "enabled": false
+      }
+    ]
+  },
+  "mqtt": {
+    "enabled": false,
+    "host": "",
+    "port": 1883,
+    "username": "",
+    "password": "",
+    "base_topic": "ambiwled",
+    "discovery_prefix": "homeassistant",
+    "device_name": "AmbiWled",
+    "publish_interval_s": 2.0
+  },
+  "web": {
+    "host": "0.0.0.0",
+    "port": 8080,
+    "preview_fps": 15.0
+  }
+}

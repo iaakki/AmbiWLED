@@ -1,0 +1,16 @@
+# Local environment
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Runtime configuration: contains your addresses and broker credentials.
+# A generic example lives in config/config.example.json.
+config/config.json
+
+# Device backups and generated artefacts: these hold network details,
+# WiFi SSIDs and personal layout data. Never commit them.
+backups/
+*.ledmap.json
+ledmap*.json
+corner-test.png

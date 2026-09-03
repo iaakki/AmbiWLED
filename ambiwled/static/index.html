@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AmbiWled</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<header class="metrics" id="metrics">
+  <div class="brand">Ambi<span>Wled</span></div>
+  <div class="metric"><label>TV</label><b id="m-state" class="state">…</b></div>
+  <div class="metric"><label>Source fps</label><b id="m-sfps">–</b></div>
+  <div class="metric"><label>Output fps</label><b id="m-ofps">–</b></div>
+  <div class="metric"><label>TV latency</label><b id="m-lat">–</b></div>
+  <div class="metric"><label>Failed polls</label><b id="m-fail">–</b></div>
+  <div class="metric"><label>API</label><b id="m-api">–</b></div>
+  <div class="metric"><label>Ambilight</label><b id="m-amb" class="state">–</b></div>
+  <div class="metric"><label>Controller</label><b id="m-wled" class="state">–</b></div>
+  <div class="metric"><label>Mode</label><b id="m-mode" class="state">–</b></div>
+  <div class="metric"><label>Emitting</label><b id="m-emit" class="state">–</b></div>
+  <div class="metric"><label>Controller fps</label><b id="m-cfps">–</b></div>
+  <div class="metric"><label>Strip draw</label><b id="m-pwr">–</b></div>
+  <div class="spacer"></div>
+  <div class="metric"><label>Link</label><b id="m-ws" class="state">connecting</b></div>
+  <div class="metric"><label>Changes</label><b id="m-save" class="state">saved</b></div>
+</header>
+
+<main>
+  <section class="panel wide">
+    <h2>Live preview</h2>
+    <div class="preview-wrap">
+      <canvas id="ceiling"></canvas>
+    </div>
+    <div class="strip-label">Output index 0 → <span id="strip-max">461</span></div>
+    <canvas id="strip"></canvas>
+    <div id="edge-legend" class="legend"></div>
+  </section>
+
+  <section class="panel">
+    <h2>Controls</h2>
+    <p class="note">The same settings as Home Assistant's Controls card, in one place. Full
+      explanations for each are in the panels below.</p>
+    <div class="grid">
+      <label>Ambilight
+        <select data-path="mode">
+          <option value="ambilight">Ambilight — stream to the controller</option>
+          <option value="preset">Preset — let the controller run one of its own</option>
+          <option value="off">Off — stop sending</option>
+        </select>
+      </label>
+      <label class="check"><input data-path="dimming.enabled" data-type="bool" type="checkbox"> Auto-dim by sun</label>
+      <label>Brightness<input data-path="colour.brightness" data-type="float" type="number" min="0" max="2" step="0.05"></label>
+      <label>Saturation<input data-path="colour.saturation" data-type="float" type="number" min="0" max="3" step="0.05"></label>
+      <label class="preset-row" hidden>Preset
+        <select data-path="preset_slot" data-type="int" class="preset-select"></select>
+      </label>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>Mode</h2>
+    <div class="grid">
+      <label>What runs
+        <select data-path="mode">
+          <option value="ambilight">Ambilight — stream to the controller</option>
+          <option value="preset">Preset — let the controller run one of its own</option>
+          <option value="off">Off — stop sending</option>
+        </select>
+      </label>
+      <label class="preset-row" hidden>Preset
+        <select data-path="preset_slot" data-type="int" class="preset-select"></select>
+      </label>
+    </div>
+    <div class="readout" id="preset-readout"></div>
+    <p class="note">Ambilight streaming and a controller preset are both just something the strip is
+      doing &mdash; AmbiWled only decides which. In <b>Preset</b> mode it stops streaming and tells the
+      controller which stored preset to run, including an audio-reactive one if you have one set up.
+      Turning this <b>Off</b> stops sending entirely; after the controller's realtime timeout the
+      ceiling falls back to whatever it was already showing.</p>
+    <p class="note">If your WLED controller is also added to Home Assistant directly, prefer its own
+      preset picker &mdash; it has real names, this one is a bare slot number. This picker exists for
+      setups where AmbiWled is the only integration point.</p>
+  </section>
+
+  <section class="panel">
+    <h2>Source</h2>
+    <div class="grid">
+      <label>TV IP<input id="tv_ip" data-path="source.tv_ip" type="text"></label>
+      <label>API version
+        <select id="api_version" data-path="source.api_version" data-type="apiver">
+          <option value="">auto-detect</option><option value="6">6</option><option value="1">1</option>
+        </select>
+      </label>
+      <label>Endpoint
+        <select data-path="source.endpoint"><option>processed</option><option>measured</option></select>
+      </label>
+      <label>Poll rate (Hz)<input data-path="source.poll_hz" data-type="float" type="number" min="0.5" max="60" step="0.5"></label>
+      <label>Request timeout (s)<input data-path="source.request_timeout_s" data-type="float" type="number" min="0.1" max="10" step="0.1"></label>
+      <label>Fail threshold<input data-path="source.fail_threshold" data-type="int" type="number" min="1" max="20"></label>
+      <label>TV-off probe (s)<input data-path="source.off_probe_interval_s" data-type="float" type="number" min="1" max="60" step="1"></label>
+      <label>Ambilight power check (s)<input data-path="source.ambilight_power_check_s" data-type="float" type="number" min="0" max="60" step="1"></label>
+      <label class="check"><input data-path="source.adaptive_backoff" data-type="bool" type="checkbox"> Adaptive backoff</label>
+    </div>
+    <div class="readout">Detected layout: <b id="layout">unknown</b></div>
+  </section>
+
+  <section class="panel">
+    <h2>Frame generation</h2>
+    <div class="grid">
+      <label>Mode
+        <select data-path="frames.mode" id="frame-mode">
+          <option value="smoothing">smoothing</option>
+          <option value="interpolation">interpolation</option>
+          <option value="passthrough">passthrough</option>
+        </select>
+      </label>
+      <label>Output fps<input data-path="frames.output_fps" data-type="float" type="number" min="1" max="240" step="1"></label>
+      <label>Tau (ms)<input data-path="frames.tau_ms" data-type="float" type="number" min="1" max="1000" step="5"></label>
+      <label>Cut threshold<input data-path="frames.cut_threshold" data-type="float" type="number" min="1" max="255" step="5"></label>
+      <label class="check"><input data-path="frames.adaptive_alpha" data-type="bool" type="checkbox"> Adaptive alpha (snappy scene cuts)</label>
+    </div>
+    <p class="note" id="mode-note"></p>
+    <p class="note warn">Disable WLED's own crossfade / transition time while streaming — two smoothing stages in series produce mush.</p>
+  </section>
+
+  <section class="panel">
+    <h2>Colour</h2>
+    <div class="grid">
+      <label>Saturation<input data-path="colour.saturation" data-type="float" type="number" min="0" max="3" step="0.05"></label>
+      <label>Brightness<input data-path="colour.brightness" data-type="float" type="number" min="0" max="2" step="0.05"></label>
+      <label>Gamma<input data-path="colour.gamma" data-type="float" type="number" min="0.3" max="3" step="0.05"></label>
+      <label>Black floor (0–255)<input data-path="colour.black_floor" data-type="float" type="number" min="0" max="255" step="1"></label>
+    </div>
+    <label class="check"><input data-path="colour.perceptual_brightness" data-type="bool" type="checkbox"> Perceptual brightness (0.5 looks half as bright)</label>
+    <p class="note warn">Gamma 1.0 means off. WLED applies its own gamma — setting it in both places double-corrects and crushes the low end.</p>
+    <div class="readout">Applied scale: <b id="bri-applied">–</b></div>
+  </section>
+
+  <section class="panel">
+    <h2>Auto-dim by the sun</h2>
+    <div class="grid">
+      <label class="check"><input data-path="dimming.enabled" data-type="bool" type="checkbox"> Follow sunrise / sunset</label>
+      <label>Latitude<input data-path="dimming.latitude" data-type="float" type="number" min="-90" max="90" step="0.01"></label>
+      <label>Longitude<input data-path="dimming.longitude" data-type="float" type="number" min="-180" max="180" step="0.01"></label>
+      <label>Day level<input data-path="dimming.day_level" data-type="float" type="number" min="0" max="1" step="0.05"></label>
+      <label>Night level<input data-path="dimming.night_level" data-type="float" type="number" min="0" max="1" step="0.05"></label>
+      <label>Curve shape<input data-path="dimming.curve_exponent" data-type="float" type="number" min="0.05" max="8" step="0.1"></label>
+      <label>Sunrise offset (min)<input data-path="dimming.sunrise_offset_minutes" data-type="float" type="number" min="-240" max="240" step="5"></label>
+      <label>Sunset offset (min)<input data-path="dimming.sunset_offset_minutes" data-type="float" type="number" min="-240" max="240" step="5"></label>
+    </div>
+    <div class="row-actions">
+      <button id="use-location">Use my location</button>
+      <input type="text" id="paste-location" placeholder="or paste coordinates / a map link"
+             enterkeyhint="done" style="flex:1;min-width:220px">
+      <button id="apply-location">OK</button>
+    </div>
+    <div class="note" id="location-note"></div>
+    <div class="readout" id="sun-readout">–</div>
+    <canvas id="dimming-chart" style="width:100%;height:170px;display:block;margin:8px 0"></canvas>
+    <div class="legend">
+      <span><span class="swatch" style="background:#4da3ff"></span>Final output (this brightness &times; auto-dim)</span>
+      <span><span class="swatch" style="background:#5c6472"></span>Auto-dim alone</span>
+    </div>
+    <p class="note">Brightness sits at Night level all night, then follows a dome peaking at Day level at solar
+      noon — brightest at midday, dimmest at dawn and dusk, meeting Night level exactly at sunrise and
+      sunset with no jump. Curve shape 1 is a plain parabola; above 1 narrows the midday peak, below 1
+      broadens it toward a plateau. Times are computed locally from the coordinates — no external
+      service, so it keeps working with the internet down. Above the Arctic circle it holds the day or
+      night level through polar day and polar night.</p>
+  </section>
+
+  <section class="panel wide">
+    <h2>Mapping</h2>
+    <div class="grid">
+      <label>LED count<input data-path="led.count" data-type="int" type="number" min="1" max="10000"></label>
+      <label class="check"><input data-path="mapping.corner_blend" data-type="bool" type="checkbox"> Corner blend (continuous across edge joins)</label>
+    </div>
+    <div class="budget" id="budget"></div>
+    <table class="edges">
+      <thead><tr>
+        <th>Order</th><th>Name</th><th>Start</th><th>Count</th><th>Source</th>
+        <th>Synth from</th><th>Synth to</th><th>Src rev</th><th>Out rev</th><th>Brightness</th><th></th>
+      </tr></thead>
+      <tbody id="edge-rows"></tbody>
+    </table>
+    <div class="row-actions">
+      <button id="add-edge">Add edge</button>
+      <button id="fit-edges">Fit to LED count</button>
+      <label class="check inline"><input type="checkbox" id="manual-ranges"> Manual pixel ranges</label>
+    </div>
+    <p class="note">Edges are packed head-to-tail in list order, so gaps and overlaps
+      cannot happen &mdash; set each run&rsquo;s <b>Count</b> and the starts follow. Use &uarr; &darr;
+      to match the order the strip physically runs. <b>Identify</b> lights that run for 10&nbsp;s and
+      works on what you are editing right now, even before it validates.</p>
+    <div id="validation" class="validation"></div>
+  </section>
+
+  <section class="panel">
+    <h2>Output</h2>
+    <div class="grid">
+      <label>Realtime timeout (s)<input data-path="output.timeout_s" data-type="int" type="number" min="1" max="254"></label>
+      <label>Presence check (s)<input data-path="output.presence_check_s" data-type="float" type="number" min="0" max="600" step="1"></label>
+      <label class="check"><input data-path="output.require_online" data-type="bool" type="checkbox"> Only send when a controller answers</label>
+    </div>
+    <table class="edges">
+      <thead><tr><th>Host</th><th>UDP port</th><th>HTTP port</th><th>Offset</th><th>Count</th><th>On</th><th></th></tr></thead>
+      <tbody id="target-rows"></tbody>
+    </table>
+    <div class="row-actions">
+      <button id="add-target">Add target</button>
+      <button id="push-frontback">Segments: front &rarr; back (recommended)</button>
+      <button id="push-segments">Segments: one per edge</button>
+      <label class="check inline"><input type="checkbox" id="save-preset" checked> also save as WLED preset 2 and make it boot</label>
+    </div>
+    <p class="note"><b>Front &rarr; back</b> is one mirrored segment whose offset is set to the middle
+      of the front run, so a single effect starts at the front centre and curls down both sides to
+      meet at the rear &mdash; in phase, with no restart at the corners.
+      <b>One per edge</b> gives each run its own effect instead. Both are derived from your edge
+      layout, so the pixel arithmetic is done for you. Segments only affect WLED&rsquo;s <em>own</em> effects &mdash; the realtime stream
+      writes the whole strip and ignores them. Deriving them from the edges means one definition of
+      the geometry rather than two. Keep WLED&rsquo;s realtime segment set to &ldquo;entire strip&rdquo;
+      (<code>liveseg = -1</code>) and its realtime LED offset at 0, or the stream will be confined.</p>
+    <div class="readout" id="controller-readout">–</div>
+    <p class="note">When the TV is off the bridge stops sending; after the timeout WLED reverts to its previous state. Do not set 255.</p>
+  </section>
+
+  <section class="panel">
+    <h2>Home Assistant / MQTT</h2>
+    <div class="grid">
+      <label class="check"><input data-path="mqtt.enabled" data-type="bool" type="checkbox"> Publish to MQTT</label>
+      <label>Broker host<input data-path="mqtt.host" type="text"></label>
+      <label>Port<input data-path="mqtt.port" data-type="int" type="number" min="1" max="65535"></label>
+      <label>Username<input data-path="mqtt.username" type="text"></label>
+      <label>Password<input data-path="mqtt.password" type="password"></label>
+      <label>Base topic<input data-path="mqtt.base_topic" type="text"></label>
+      <label>Discovery prefix<input data-path="mqtt.discovery_prefix" type="text"></label>
+      <label>Publish every (s)<input data-path="mqtt.publish_interval_s" data-type="float" type="number" min="0.5" max="60" step="0.5"></label>
+    </div>
+    <div class="readout" id="mqtt-readout">–</div>
+    <p class="note">Entities appear in Home Assistant automatically via MQTT discovery, and
+      Node-RED can drive the same topics. The password is never sent back to this page &mdash;
+      it shows as <code>********</code> and is only overwritten if you actually type a new one.</p>
+  </section>
+
+  <section class="panel">
+    <h2>Config</h2>
+    <div class="row-actions">
+      <button id="export" class="ghost">Export JSON</button>
+      <button id="import" class="ghost">Import JSON</button>
+      <button id="reset" class="danger">Reset to defaults</button>
+      <input type="file" id="import-file" accept="application/json" hidden>
+    </div>
+    <p class="note">Changes apply live and persist automatically. Export before experimenting with a mapping that works.</p>
+  </section>
+</main>
+
+<div id="toast" class="toast"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>
