@@ -122,9 +122,17 @@ function mergeInto(base, patch) {
   return base;
 }
 
+let _pushSeq = 0;
 function pushConfig(patch, immediate) {
   pendingPatch = mergeInto(pendingPatch || {}, patch);
   clearTimeout(saveTimer);
+  // Two immediate pushes in quick succession (e.g. toggling something off
+  // then straight back on) are two separate in-flight requests, and network
+  // latency gives no guarantee the responses come back in the order they
+  // were sent. Only the response to the *most recently issued* request may
+  // update cfg - an older one arriving late must not un-apply a newer
+  // change the user already made.
+  const mySeq = ++_pushSeq;
   const send = async () => {
     const body = pendingPatch;
     pendingPatch = null;
@@ -136,8 +144,10 @@ function pushConfig(patch, immediate) {
       });
       const data = await r.json();
       if (!r.ok) { toast((data.errors || ['not applied'])[0], true); return; }
-      cfg = data.config;
-      showSaved();
+      if (mySeq === _pushSeq) {
+        cfg = data.config;
+        showSaved();
+      }
     } catch (err) {
       toast('Not applied: ' + err.message, true);
     }
@@ -269,23 +279,35 @@ function flashSlot(slot) {
 
 /* ---------- sliders (custom pointer drag, matches the design) ---------- */
 
+// Most sliders live inside a page that gets torn down and rebuilt (innerHTML
+// = '') on every render, so a fresh element each time is normal and each
+// needs its own listeners. #bright-slider on the Simple page is the one
+// exception - it's static markup, re-wired on every renderSimple() call
+// (every toggle, every save) - so without this guard it would pick up a
+// fresh pair of pointerdown/pointermove listeners each time, all firing on
+// every future drag: one PUT per accumulated listener per pointermove
+// event, not one.
+const _wiredSliders = new WeakSet();
 function wireSlider(track, thumb, fill, thumbSize, getPct, setPct) {
   const paint = (pct) => {
     fill.style.width = pct + '%';
     thumb.style.left = `calc((100% - ${thumbSize}px) * ${clamp(pct, 0, 100) / 100})`;
   };
-  const fromEvent = (ev) => {
-    const r = track.getBoundingClientRect();
-    return clamp(Math.round(((ev.clientX - r.left) / r.width) * 100), 0, 100);
-  };
-  track.addEventListener('pointerdown', (ev) => {
-    try { track.setPointerCapture(ev.pointerId); } catch (e) {}
-    const pct = fromEvent(ev); paint(pct); setPct(pct);
-  });
-  track.addEventListener('pointermove', (ev) => {
-    if (!ev.buttons) return;
-    const pct = fromEvent(ev); paint(pct); setPct(pct);
-  });
+  if (!_wiredSliders.has(track)) {
+    _wiredSliders.add(track);
+    const fromEvent = (ev) => {
+      const r = track.getBoundingClientRect();
+      return clamp(Math.round(((ev.clientX - r.left) / r.width) * 100), 0, 100);
+    };
+    track.addEventListener('pointerdown', (ev) => {
+      try { track.setPointerCapture(ev.pointerId); } catch (e) {}
+      const pct = fromEvent(ev); paint(pct); setPct(pct);
+    });
+    track.addEventListener('pointermove', (ev) => {
+      if (!ev.buttons) return;
+      const pct = fromEvent(ev); paint(pct); setPct(pct);
+    });
+  }
   paint(getPct());
   return paint;
 }
