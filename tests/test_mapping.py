@@ -110,35 +110,63 @@ def test_rear_synthesis_modes(cfg, layout, mode):
         assert not np.allclose(out, out[0])
 
 
-def test_source_reversed_flips_zone_order(cfg, layout):
+def test_reversed_flips_a_direct_edges_zone_order(cfg, layout):
+    """One `reversed` field, not two: on a plain physical side it mirrors
+    the edge's output, same as the old source_reversed used to."""
     zones = zone_ramp(21, seed=11)
     normal = Mapper().build(cfg, layout) @ zones
 
     cfg["mapping"]["corner_blend"] = False
     for e in cfg["mapping"]["edges"]:
         if e["name"] == "tv_wall":
-            e["source_reversed"] = True
+            e["reversed"] = True
     flipped = Mapper().build(cfg, layout) @ zones
 
     plain_cfg = config_mod.default_config()
     plain_cfg["mapping"]["corner_blend"] = False
     plain = Mapper().build(plain_cfg, layout) @ zones
-    # Reversing the source mirrors the edge's output.
     assert np.allclose(flipped[0:133], plain[0:133][::-1], atol=1e-3)
     assert not np.allclose(normal[0:133], flipped[0:133])
 
 
-def test_output_reversed_flips_pixel_order(cfg, layout):
+def test_reversed_flips_a_synth_edges_pixel_order(cfg, layout):
+    """A synth/mirror edge has no source order of its own to reverse, so
+    `reversed` flips its finished pixels instead - same visible result."""
     zones = zone_ramp(21, seed=13)
     cfg["mapping"]["corner_blend"] = False
     base = Mapper().build(cfg, layout) @ zones
 
     for e in cfg["mapping"]["edges"]:
-        if e["name"] == "right_side":
-            e["output_reversed"] = True
+        if e["name"] == "rear":  # synth_gradient in the fixture config
+            e["reversed"] = True
     flipped = Mapper().build(cfg, layout) @ zones
-    a, b = 133, 133 + 98
+    a, b = 231, 231 + 133
     assert np.allclose(flipped[a:b], base[a:b][::-1], atol=1e-3)
+
+
+def test_reversed_keeps_corner_blend_attached_to_the_right_neighbour(cfg, layout):
+    """The subtlety `reversed` has to hide: with corner blending on, flipping
+    a direct edge must not relocate its blended pixel to the wrong end. A
+    plain row-reversal (the naive "one field" implementation) would do
+    exactly that, since the blend was computed for the un-flipped geometry.
+    """
+    plain = Mapper().build(cfg, layout)  # corner_blend defaults on
+    left_zone = layout.offset("left")
+    left_count = layout.count("left")
+    # tv_wall borders left_side (its predecessor in edge order): pixel 0
+    # should carry some weight from left_side's zones.
+    assert plain[0, left_zone : left_zone + left_count].sum() > 0
+
+    for e in cfg["mapping"]["edges"]:
+        if e["name"] == "tv_wall":
+            e["reversed"] = True
+    reversed_built = Mapper().build(cfg, layout)
+    # Still true after flipping: the blend belongs to the physical seam,
+    # not to whichever TV content ends up displayed there.
+    assert reversed_built[0, left_zone : left_zone + left_count].sum() > 0
+
+    naive = plain[0:133][::-1]
+    assert not np.allclose(reversed_built[0:133], naive, atol=1e-3)
 
 
 def test_layout_change_is_handled(cfg, layout):

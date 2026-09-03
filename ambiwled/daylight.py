@@ -64,17 +64,14 @@ def _from_julian(j: float) -> datetime:
     return datetime(1970, 1, 1, tzinfo=timezone.utc) + timedelta(days=j - 2440587.5)
 
 
-def _dome(s: float, exponent: float) -> float:
-    """0 at s=0 and s=1, peak 1 at s=0.5 — a parabola at exponent=1.
+def _dome(s: float) -> float:
+    """0 at s=0 and s=1, peak 1 at s=0.5: a parabola over the daylight span.
 
-    A downward parabola over [0, 1] is `4s(1-s)`: zero at both ends, exactly
-    1.0 at the midpoint. Raising it to a power keeps those same three points
-    fixed while reshaping what happens between them — > 1 narrows the midday
-    peak, < 1 broadens it into more of a plateau.
+    `4s(1-s)` is zero at both ends and exactly 1.0 at the midpoint - solar
+    noon, by construction, since s runs sunrise..sunset.
     """
     s = min(max(s, 0.0), 1.0)
-    base = 4.0 * s * (1.0 - s)
-    return base if exponent == 1.0 else base ** exponent
+    return 4.0 * s * (1.0 - s)
 
 
 class DimmingSchedule:
@@ -99,9 +96,6 @@ class DimmingSchedule:
         self.longitude = float(d.get("longitude", 24.94))
         self.day_level = float(d.get("day_level", 1.0))
         self.night_level = float(d.get("night_level", 0.4))
-        self.curve_exponent = max(float(d.get("curve_exponent", 1.0)), 0.05)
-        self.sunrise_offset = float(d.get("sunrise_offset_minutes", 0.0))
-        self.sunset_offset = float(d.get("sunset_offset_minutes", 0.0))
         self._cache = None
 
     def times_for(self, day: date) -> tuple[datetime, datetime] | None:
@@ -119,13 +113,11 @@ class DimmingSchedule:
             return 0.0 if polar_state(self.latitude, self.longitude, now.date()) == "polar_night" else 1.0
 
         sunrise, sunset = times
-        sunrise = sunrise + timedelta(minutes=self.sunrise_offset)
-        sunset = sunset + timedelta(minutes=self.sunset_offset)
         span = (sunset - sunrise).total_seconds()
         if span <= 0 or not (sunrise <= now <= sunset):
             return 0.0
         s = (now - sunrise).total_seconds() / span
-        return _dome(s, self.curve_exponent)
+        return _dome(s)
 
     def level(self, now: datetime | None = None) -> float:
         """The multiplier to apply to the configured brightness."""

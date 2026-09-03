@@ -4,9 +4,11 @@ from __future__ import annotations
 import asyncio
 import json
 
+import aiomqtt
 import pytest
 
 from ambiwled import config as config_mod
+from ambiwled import mqtt as mqtt_mod
 from ambiwled.mqtt import ENTITIES, MqttBridge, state_payload
 
 
@@ -294,7 +296,6 @@ def test_an_identify_button_exists_per_edge():
     ("brightness", "0.45", ("config", {"colour": {"brightness": 0.45}})),
     ("saturation", "1.6", ("config", {"colour": {"saturation": 1.6}})),
     ("black_floor", "12", ("config", {"colour": {"black_floor": 12.0}})),
-    ("frame_mode", "passthrough", ("config", {"frames": {"mode": "passthrough"}})),
     ("identify", "Front", ("identify", "Front")),
 ])
 def test_each_control_topic_routes(suffix, payload, expected):
@@ -302,7 +303,7 @@ def test_each_control_topic_routes(suffix, payload, expected):
 
 
 @pytest.mark.parametrize("suffix,payload", [
-    ("brightness", "not-a-number"), ("frame_mode", "magic"),
+    ("brightness", "not-a-number"),
     ("identify", ""), ("unknown_thing", "1"), ("saturation", ""),
 ])
 def test_bad_control_payloads_are_rejected(suffix, payload):
@@ -351,3 +352,54 @@ def test_identify_is_an_action_not_a_config_change():
     assert kind == "identify"
     b.on_action(kind, {"edge": value})
     assert actions == [("identify", {"edge": "Front"})]
+
+
+# -- connection test (item 7: the wizard needs to know *why* it failed) ------
+
+def _fake_client(raises=None):
+    class _Fake:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            if raises:
+                raise raises
+            return self
+
+        async def __aexit__(self, *exc_info):
+            return False
+
+    return _Fake
+
+
+async def test_test_connection_reports_success(monkeypatch):
+    monkeypatch.setattr(aiomqtt, "Client", _fake_client())
+    assert await mqtt_mod.test_connection("192.0.2.30", 1883, "user", "pass") == {"ok": True}
+
+
+async def test_test_connection_distinguishes_bad_credentials(monkeypatch):
+    """CONNACK 5 = not authorized - the broker was reached and said no."""
+    monkeypatch.setattr(aiomqtt, "Client", _fake_client(aiomqtt.MqttCodeError(5)))
+    result = await mqtt_mod.test_connection("192.0.2.30", 1883, "user", "wrong")
+    assert result == {"ok": False, "reason": "auth"}
+
+
+async def test_test_connection_distinguishes_a_bad_username_or_password_code(monkeypatch):
+    monkeypatch.setattr(aiomqtt, "Client", _fake_client(aiomqtt.MqttCodeError(4)))
+    result = await mqtt_mod.test_connection("192.0.2.30", 1883, "user", "wrong")
+    assert result["reason"] == "auth"
+
+
+async def test_test_connection_reports_unreachable_for_a_network_failure(monkeypatch):
+    monkeypatch.setattr(aiomqtt, "Client", _fake_client(ConnectionRefusedError("nope")))
+    result = await mqtt_mod.test_connection("192.0.2.55", 1883, "", "")
+    assert result["ok"] is False
+    assert result["reason"] == "unreachable"
+
+
+async def test_test_connection_treats_other_connack_codes_as_unreachable(monkeypatch):
+    """Reached but refused for a reason that is not a credentials problem
+    (e.g. rc 3, server unavailable) - still not something "auth" describes."""
+    monkeypatch.setattr(aiomqtt, "Client", _fake_client(aiomqtt.MqttCodeError(3)))
+    result = await mqtt_mod.test_connection("192.0.2.30", 1883, "", "")
+    assert result["reason"] == "unreachable"

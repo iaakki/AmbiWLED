@@ -1,7 +1,13 @@
-"""Output frame generation: decoupled from the source poll rate."""
+"""Output frame generation: decoupled from the source poll rate.
+
+One algorithm: linear interpolation between the last two real samples,
+timed against their own observed arrival interval rather than the
+configured poll rate, so a slow or jittery TV doesn't cause overshoot.
+When `output_fps` equals the poll rate this still runs - it just rarely
+has anything to interpolate, which is what "no interpolation" means here.
+"""
 from __future__ import annotations
 
-import math
 import time
 from collections import deque
 from typing import Any
@@ -26,11 +32,7 @@ class FrameEngine:
 
     def update(self, cfg: dict[str, Any]) -> None:
         f = cfg.get("frames", {})
-        self.mode = f.get("mode", "smoothing")
         self.output_fps = float(f.get("output_fps", 60.0))
-        self.tau = max(float(f.get("tau_ms", 80.0)), 1.0) / 1000.0
-        self.adaptive_alpha = bool(f.get("adaptive_alpha", True))
-        self.cut_threshold = max(float(f.get("cut_threshold", 100.0)), 1.0)
 
     def resize(self, led_count: int) -> None:
         if led_count == self.led_count:
@@ -72,32 +74,15 @@ class FrameEngine:
 
     # -- output ----------------------------------------------------------
 
-    def tick(self, dt: float, now: float | None = None) -> np.ndarray:
+    def tick(self, now: float | None = None) -> np.ndarray:
         now = time.monotonic() if now is None else now
-
-        if self.mode == "passthrough":
-            self.out = self.target.copy()
-            return self.out
-
-        if self.mode == "interpolation":
-            interval = self.source_interval
-            if self.prev_target_time is not None and interval > 0:
-                t = (now - self.target_time) / interval
-                t = min(max(t, 0.0), 1.0)
-                # Interpolate between the last two source frames: always one
-                # full source frame behind, by construction.
-                self.out = self.prev_target + (self.target - self.prev_target) * t
-            else:
-                self.out = self.target.copy()
-            return self.out
-
-        # smoothing
-        alpha = 1.0 - math.exp(-dt / self.tau)
-        delta = self.target - self.out
-        if self.adaptive_alpha:
-            boost = np.clip(np.abs(delta).max(axis=1) / self.cut_threshold, 0.0, 1.0)
-            a = alpha + (1.0 - alpha) * boost
-            self.out = self.out + delta * a[:, None]
+        interval = self.source_interval
+        if self.prev_target_time is not None and interval > 0:
+            t = (now - self.target_time) / interval
+            t = min(max(t, 0.0), 1.0)
+            # Interpolate between the last two source frames: always one full
+            # source frame behind, by construction.
+            self.out = self.prev_target + (self.target - self.prev_target) * t
         else:
-            self.out = self.out + delta * alpha
+            self.out = self.target.copy()
         return self.out

@@ -106,6 +106,14 @@ class Mapper:
 
         Empty for edges with no real source.  `synth_gradient` reports its two
         endpoints so neighbouring edges can still blend into it.
+
+        For a real physical side, `reversed` flips the order *here* — before
+        corner blending — rather than after building the rows.  A neighbour's
+        corner blend reads this edge's own zone order via `refs_by_edge`, so a
+        flip has to be visible at this point or the blended pixel at the join
+        ends up on the wrong physical corner.  See `build()` for the other
+        edge kinds, where there is no corner blend to keep in step and the
+        flip is applied to the finished rows instead.
         """
         src = edge.get("source")
         if src == "synth_gradient":
@@ -118,7 +126,7 @@ class Mapper:
         if off is None:
             return []
         refs = list(range(off, off + layout.count(src)))
-        if edge.get("source_reversed"):
+        if edge.get("reversed"):
             refs.reverse()
         return refs
 
@@ -169,7 +177,11 @@ class Mapper:
             rows = self._build_edge(edge, refs_by_edge, i, layout, corner_blend, zone_count)
             if rows is None:
                 continue
-            if edge.get("output_reversed"):
+            # Direct sides already had `reversed` applied to their zone order
+            # in _edge_refs, ahead of corner blending. Every other kind has no
+            # blend to stay consistent with, so it is simplest to flip the
+            # finished rows here instead.
+            if edge.get("reversed") and src not in layout.names:
                 rows = rows[::-1]
             matrix[start : start + n] = rows
             built[str(edge.get("name"))] = rows
@@ -185,7 +197,7 @@ class Mapper:
                 )
                 continue
             rows = _resample_rows(source_rows, n)[::-1]  # mirrored = copied, reversed
-            if edge.get("output_reversed"):
+            if edge.get("reversed"):
                 rows = rows[::-1]
             matrix[start : start + n] = rows
 

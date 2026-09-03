@@ -12,6 +12,7 @@ import aiohttp
 from aiohttp import WSMsgType, web
 
 from . import config as config_mod
+from . import mqtt as mqtt_mod
 from .bridge import Bridge
 from .wled import (WledClient, front_to_back_segment, segments_from_edges)
 
@@ -40,8 +41,10 @@ class Server:
         a.router.add_put("/api/config", self.put_config)
         a.router.add_post("/api/config/reset", self.reset_config)
         a.router.add_post("/api/config/validate", self.validate_config)
+        a.router.add_post("/api/config/import", self.import_config)
         a.router.add_post("/api/wled/segments", self.push_segments)
         a.router.add_post("/api/resolve-link", self.resolve_link)
+        a.router.add_post("/api/mqtt/test", self.test_mqtt)
         a.router.add_get("/ws", self.websocket)
         a.router.add_static("/static/", STATIC_DIR, name="static")
 
@@ -94,6 +97,62 @@ class Server:
         self.bridge.apply_config(cfg)
         self._schedule_save()
         return web.json_response({"errors": [], "config": config_mod.redacted(cfg)})
+
+    async def import_config(self, request: web.Request) -> web.Response:
+        """Replace the whole config with an uploaded file.
+
+        Unlike a live-editing patch, an import can come from a much older (or
+        newer) install. The schema has changed shape more than once, so this
+        refuses anything that does not declare the version it was written
+        for, rather than silently merging a stale shape in and losing whatever
+        no longer matches - see HANDOFF's note on items 1-5.
+        """
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"errors": ["body is not valid JSON"]}, status=400)
+        if not isinstance(body, dict):
+            return web.json_response({"errors": ["body must be a config object"]}, status=400)
+
+        current = config_mod.DEFAULT_CONFIG["version"]
+        got = body.get("version")
+        if got != current:
+            return web.json_response(
+                {"errors": [
+                    f"this file is schema version {got!r}, but this build expects {current}. "
+                    "Export a fresh copy from this build instead of an older one."
+                ]},
+                status=400,
+            )
+
+        candidate = config_mod.merge_defaults(body)
+        candidate = config_mod.unredact(candidate, self.bridge.cfg)
+        errors = config_mod.validate(candidate)
+        if errors:
+            return web.json_response({"errors": errors}, status=400)
+        self.bridge.apply_config(candidate)
+        self._schedule_save()
+        return web.json_response({"errors": [], "config": config_mod.redacted(candidate)})
+
+    async def test_mqtt(self, request: web.Request) -> web.Response:
+        """Try connecting with the broker fields the wizard/UI currently has,
+        which may not be saved yet. A blank or placeholder password falls
+        back to whatever is already stored, same as a config patch would."""
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "body is not valid JSON"}, status=400)
+        host = str(body.get("host", "")).strip()
+        if not config_mod._is_host(host):
+            return web.json_response({"ok": False, "reason": "unreachable",
+                                       "detail": "not a valid host"})
+        port = int(body.get("port", 1883) or 1883)
+        username = str(body.get("username", "") or "")
+        password = body.get("password")
+        if not password or password == config_mod.REDACTED:
+            password = self.bridge.cfg.get("mqtt", {}).get("password", "")
+        result = await mqtt_mod.test_connection(host, port, username, password)
+        return web.json_response(result)
 
     def apply_patch(self, patch: dict[str, Any]) -> list[str]:
         """Validate, apply and persist a partial config change.

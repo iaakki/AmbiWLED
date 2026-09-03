@@ -306,14 +306,11 @@ class Bridge:
     # -- output loop -----------------------------------------------------
 
     async def _output_loop(self) -> None:
-        last = time.monotonic()
-        next_tick = last
+        next_tick = time.monotonic()
         while True:
             fps = max(float(self.cfg["frames"].get("output_fps", 60.0)), 1.0)
             period = 1.0 / fps
             now = time.monotonic()
-            dt = max(now - last, 1e-4)
-            last = now
 
             if now - self._dim_checked > 20.0:
                 self._dim_checked = now
@@ -329,7 +326,7 @@ class Bridge:
                 frame = ident
                 emit = True
             else:
-                frame = self.engine.tick(dt, now)
+                frame = self.engine.tick(now)
                 emit = self.should_emit()
 
             self.last_frame = np.clip(frame + 0.5, 0, 255).astype(np.uint8)

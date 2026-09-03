@@ -146,14 +146,14 @@ async def test_metrics_report_reality(wired):
 def edges_for(brightness_by_name: dict[str, float]) -> list[dict]:
     edges = [
         {"name": "tv_wall", "pixel_start": 0, "pixel_count": 133, "source": "top",
-         "source_reversed": False, "output_reversed": False},
+         "reversed": False},
         {"name": "right_side", "pixel_start": 133, "pixel_count": 98, "source": "right",
-         "source_reversed": False, "output_reversed": False},
+         "reversed": False},
         {"name": "rear", "pixel_start": 231, "pixel_count": 133, "source": "synth_gradient",
          "synth_from": ["right", -1], "synth_to": ["left", 0],
-         "source_reversed": False, "output_reversed": False},
+         "reversed": False},
         {"name": "left_side", "pixel_start": 364, "pixel_count": 98, "source": "left",
-         "source_reversed": False, "output_reversed": False},
+         "reversed": False},
     ]
     for e in edges:
         e["brightness"] = brightness_by_name.get(e["name"], 1.0)

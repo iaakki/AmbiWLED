@@ -93,10 +93,6 @@ CONTROLS: list[tuple[str, str, str, dict[str, Any]]] = [
         "value_template": "{{ value_json.autodim }}",
         "payload_on": "ON", "payload_off": "OFF",
         "icon": "mdi:weather-sunset-down"}),
-    ("frame_mode", "select", "Smoothing mode", {
-        "value_template": "{{ value_json.frame_mode }}",
-        "options": ["smoothing", "interpolation", "passthrough"],
-        "entity_category": "config", "icon": "mdi:blur"}),
 ]
 
 
@@ -126,7 +122,6 @@ def state_payload(metrics: dict[str, Any], cfg: dict[str, Any]) -> dict[str, Any
         "saturation": cfg.get("colour", {}).get("saturation"),
         "black_floor": cfg.get("colour", {}).get("black_floor"),
         "autodim": "ON" if cfg.get("dimming", {}).get("enabled") else "OFF",
-        "frame_mode": cfg.get("frames", {}).get("mode"),
         "sunrise": (metrics.get("dimming") or {}).get("sunrise"),
         "sunset": (metrics.get("dimming") or {}).get("sunset"),
         "dim_level": (metrics.get("dimming") or {}).get("level"),
@@ -301,10 +296,6 @@ class MqttBridge:
                 return ("config", {"preset_slot": max(0, min(int(float(text)), 250))})
             if suffix == "autodim":
                 return ("config", {"dimming": {"enabled": text.upper() == "ON"}})
-            if suffix == "frame_mode":
-                if text not in ("smoothing", "interpolation", "passthrough"):
-                    return None
-                return ("config", {"frames": {"mode": text}})
             if suffix == "brightness":
                 return ("config", {"colour": {"brightness": max(0.0, min(float(text), 2.0))}})
             if suffix == "saturation":
@@ -429,3 +420,35 @@ class MqttBridge:
             "commands": self.commands,
             "last_error": self.last_error,
         }
+
+
+# CONNACK / MQTT v5 reason codes that mean the broker was reached and said no
+# to the credentials, as opposed to nothing answering at all.
+_AUTH_REASON_CODES = {4, 5, 134, 135}  # bad user/pass, not authorized (v3.1.1 + v5)
+
+
+async def test_connection(host: str, port: int, username: str | None,
+                           password: str | None, timeout: float = 5.0) -> dict[str, Any]:
+    """Try a real connection, so the wizard can say *why* it failed.
+
+    A broker that never answers (wrong host, firewalled, not running) and one
+    that answers but rejects the login look identical from the outside unless
+    something actually attempts the handshake - so this is a real, short-lived
+    connection, not a socket probe.
+    """
+    try:
+        async with aiomqtt.Client(
+            hostname=host, port=port, username=username or None,
+            password=password or None, identifier="ambiwled-test",
+            timeout=timeout,
+        ):
+            pass
+    except aiomqtt.MqttCodeError as exc:
+        rc = exc.rc
+        code = rc.value if hasattr(rc, "value") else rc
+        if code in _AUTH_REASON_CODES:
+            return {"ok": False, "reason": "auth"}
+        return {"ok": False, "reason": "unreachable", "detail": str(exc)}
+    except Exception as exc:
+        return {"ok": False, "reason": "unreachable", "detail": str(exc)}
+    return {"ok": True}

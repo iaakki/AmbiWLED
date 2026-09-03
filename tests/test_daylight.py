@@ -64,8 +64,7 @@ def test_southern_hemisphere_is_inverted():
 
 def schedule(**overrides):
     cfg = {"dimming": {"enabled": True, "latitude": HELSINKI[0], "longitude": HELSINKI[1],
-                       "day_level": 1.0, "night_level": 0.4,
-                       "sunrise_offset_minutes": 0.0, "sunset_offset_minutes": 0.0}}
+                       "day_level": 1.0, "night_level": 0.4}}
     cfg["dimming"].update(overrides)
     return DimmingSchedule(cfg)
 
@@ -134,40 +133,6 @@ def test_sunrise_brings_it_back_up():
     s = schedule()
     sunrise, _ = sun_times(*HELSINKI, date(2026, 12, 21))
     assert s.level(sunrise - timedelta(minutes=40)) < s.level(sunrise + timedelta(minutes=40))
-
-
-def test_offsets_shift_the_window():
-    early = schedule(sunset_offset_minutes=-120)
-    plain = schedule()
-    _, sunset = sun_times(*HELSINKI, date(2026, 12, 21))
-    probe = sunset - timedelta(minutes=90)
-    assert early.level(probe) < plain.level(probe)
-
-
-def test_curve_exponent_narrows_or_broadens_the_peak():
-    sharp = schedule(curve_exponent=3.0)
-    flat = schedule(curve_exponent=0.5)
-    plain = schedule(curve_exponent=1.0)
-    sunrise, sunset = sun_times(*HELSINKI, date(2026, 6, 21))
-    probe = sunrise + (sunset - sunrise) / 4          # quarter into the day
-
-    # All three still meet the same anchors: minimum at the edges, peak at noon.
-    for s in (sharp, flat, plain):
-        assert s.level(sunrise) == pytest.approx(0.4, abs=1e-6)
-        noon = sunrise + (sunset - sunrise) / 2
-        assert s.level(noon) == pytest.approx(1.0, abs=1e-6)
-
-    # Between the anchors, exponent > 1 pulls the curve down; < 1 pushes it up.
-    assert sharp.level(probe) < plain.level(probe) < flat.level(probe)
-
-
-def test_curve_exponent_is_never_zero_or_negative():
-    """A zero or negative exponent would make the dome ill-defined; the
-    schedule must clamp rather than propagate NaN into the light output."""
-    s = schedule(curve_exponent=-5.0)
-    level = s.level(solar_noon(date(2026, 6, 21)))
-    assert level == level          # not NaN
-    assert 0.0 <= level <= 1.0
 
 
 def test_polar_night_holds_the_night_level():
