@@ -1,64 +1,118 @@
 'use strict';
 
-const $ = (s) => document.querySelector(s);
-const $$ = (s) => Array.from(document.querySelectorAll(s));
+/* ============================================================
+   AmbiWled — vanilla-JS UI, ported from the Organic-design
+   prototype (see docs/SPEC.md history). No framework: this talks
+   directly to /api/config, /api/state and /ws, same contract the
+   old UI used, so nothing about the backend needed to change to
+   support a from-scratch look.
+   ============================================================ */
 
-let cfg = null;             // live config mirror
-let pixels = new Uint8Array(0);
-let saveTimer = null;
-
-const MODE_NOTES = {
-  smoothing: 'Exponential filter. No added latency beyond the filter’s own lag, and no overshoot.',
-  interpolation: 'Smoothest result, but costs one full source frame of latency (typically 50–100 ms).',
-  passthrough: 'No temporal processing — shows exactly what the TV sends. For debugging.',
+const $ = (s, root) => (root || document).querySelector(s);
+const $$ = (s, root) => Array.from((root || document).querySelectorAll(s));
+const clamp = (v, lo, hi) => Math.min(Math.max(v, lo), hi);
+const el = (tag, attrs, ...kids) => {
+  const n = document.createElement(tag);
+  for (const k in (attrs || {})) {
+    const v = attrs[k];
+    if (v === undefined || v === null || v === false) continue;
+    if (k === 'class') n.className = v;
+    else if (k.startsWith('on')) n.addEventListener(k.slice(2), v);
+    else if (v === true) n.setAttribute(k, '');
+    else n.setAttribute(k, v);
+  }
+  for (const k of kids.flat()) { if (k != null) n.append(k.nodeType ? k : document.createTextNode(k)); }
+  return n;
 };
 
-/* ---------- helpers ---------- */
+/* ---------- global state ---------- */
 
-function getPath(obj, path) {
-  return path.split('.').reduce((o, k) => (o == null ? o : o[k]), obj);
-}
-function setPath(obj, path, value) {
-  const keys = path.split('.');
-  const last = keys.pop();
-  let node = obj;
-  for (const k of keys) { if (node[k] == null) node[k] = {}; node = node[k]; }
-  node[last] = value;
-}
-function toast(msg, bad) {
-  const t = $('#toast');
-  t.textContent = msg;
-  t.className = 'toast show' + (bad ? ' bad' : '');
-  clearTimeout(t._timer);
-  t._timer = setTimeout(() => { t.className = 'toast'; }, bad ? 6000 : 2200);
+let cfg = null;
+let metrics = {};
+let pixels = new Uint8Array(0);
+let ws = null;
+let wsBackoff = 1000;
+
+let advanced = false;
+let page = 'home';
+let wiz = null;               // {step, countIdx, pick, mqttTest, mqttErr} while running
+let pwEdit = false;            // Integrations page: password field unlocked
+let flashEdge = '';
+let confirmState = null;
+
+let pendingPatch = null;
+let saveTimer = null;
+
+const SLOTS = ['front', 'left', 'right', 'back'];
+const SLOT_COLOUR = { front: '#ff8a3d', left: '#e2557a', right: '#4fb8a8', back: '#6a7fd8' };
+const SLOT_LABEL = { front: 'Over the TV', left: 'Left side', right: 'Right side', back: 'Behind the couch' };
+const SLOT_QUESTION = {
+  front: 'How many LEDs over the TV?', left: 'How many LEDs down the left side?',
+  right: 'How many LEDs down the right side?', back: 'How many LEDs behind the couch?',
+};
+const SLOT_DEFAULT_SOURCE = { front: 'top', left: 'left', right: 'right', back: 'synth_gradient' };
+const SOURCE_OPTIONS = [
+  ['top', 'Top of the picture'], ['left', 'Left of the picture'], ['right', 'Right of the picture'],
+  ['synth_gradient', 'Made up from its neighbours'], ['mirror_top', 'Mirror of the front'],
+  ['average', 'Average of the whole picture'], ['off', 'Stays dark'],
+];
+const TABS = [
+  ['home', 'Home'], ['colour', 'Colour'], ['dim', 'Auto-dim'], ['source', 'Source'],
+  ['mapping', 'Mapping'], ['output', 'Output'], ['frames', 'Frame generation'],
+  ['integrations', 'Integrations'], ['config', 'Config'],
+];
+
+/* ---------- boot ---------- */
+
+function boot() {
+  advanced = localStorage.getItem('ambiwled.mode') === 'advanced';
+  const theme = localStorage.getItem('ambiwled.theme');
+  if (theme === 'dark' || theme === 'light') document.documentElement.setAttribute('data-theme', theme);
+
+  connectWs();
+  setInterval(renderClock, 1000);
+  setInterval(() => { if (page === 'dim' && advanced) renderPage(); }, 60000);
+  wireStaticControls();
 }
 
-/* ---------- config transport ---------- */
-
-async function loadConfig() {
-  const r = await fetch('/api/state');
-  const data = await r.json();
-  cfg = data.config;
-  renderAll();
-  showValidation(data.validation);
-  applyMetrics(data.metrics);
+function connectWs() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(`${proto}//${location.host}/ws`);
+  ws.binaryType = 'arraybuffer';
+  ws.onopen = () => { wsBackoff = 1000; setLink(true); };
+  ws.onclose = () => { setLink(false); scheduleReconnect(); };
+  ws.onerror = () => { try { ws.close(); } catch (e) {} };
+  ws.onmessage = (ev) => {
+    if (typeof ev.data === 'string') {
+      let msg;
+      try { msg = JSON.parse(ev.data); } catch (e) { return; }
+      if (msg.type === 'hello') {
+        cfg = msg.config;
+        renderAll();
+      } else if (msg.type === 'metrics') {
+        metrics = msg;
+        renderLive();
+      }
+    } else {
+      pixels = new Uint8Array(ev.data);
+      renderPreviewFromPixels();
+    }
+  };
+}
+function scheduleReconnect() {
+  setTimeout(connectWs, wsBackoff);
+  wsBackoff = Math.min(wsBackoff * 1.6, 15000);
+}
+function setLink(up) {
+  const dot = $('#link-dot');
+  if (dot) dot.classList.toggle('down', !up);
 }
 
-/* Build a nested patch object from a dotted path, e.g.
-   ('source.tv_ip', '10.0.0.1') -> { source: { tv_ip: '10.0.0.1' } } */
-function patchFrom(path, value) {
-  const keys = path.split('.');
-  const out = {};
-  let node = out;
-  keys.forEach((k, i) => {
-    if (i === keys.length - 1) node[k] = value;
-    else { node[k] = {}; node = node[k]; }
-  });
-  return out;
-}
+/* ---------- config patch / autosave ---------- */
 
 function mergeInto(base, patch) {
-  for (const [k, v] of Object.entries(patch)) {
+  for (const k in patch) {
+    const v = patch[k];
     if (v && typeof v === 'object' && !Array.isArray(v) && base[k] && typeof base[k] === 'object' && !Array.isArray(base[k])) {
       mergeInto(base[k], v);
     } else {
@@ -68,818 +122,835 @@ function mergeInto(base, patch) {
   return base;
 }
 
-let pendingPatch = null;
-let pendingFields = new Set();
-
-function setSaveState(state, detail) {
-  const el = $('#m-save');
-  if (!el) return;
-  el.className = 'state ' + state;
-  el.textContent = state === 'saving' ? 'saving…'
-    : state === 'unsaved' ? (detail || 'rejected') : 'saved';
-  el.title = detail || '';
-}
-
-function markFields(cls) {
-  pendingFields.forEach((el) => {
-    el.classList.remove('saved', 'rejected');
-    // Restart the animation rather than letting a repeat edit skip it.
-    void el.offsetWidth;
-    el.classList.add(cls);
-    if (cls === 'saved') setTimeout(() => el.classList.remove('saved'), 1200);
-  });
-  pendingFields = new Set();
-}
-
-/* Send only what changed. Sending the whole config would let this tab's stale
-   mirror clobber settings changed elsewhere — another tab, or the API. */
-function pushConfig(patch, immediate, field) {
+function pushConfig(patch, immediate) {
   pendingPatch = mergeInto(pendingPatch || {}, patch);
-  if (field) pendingFields.add(field);
-  setSaveState('saving');
   clearTimeout(saveTimer);
   const send = async () => {
     const body = pendingPatch;
     pendingPatch = null;
-    if (!body || !Object.keys(body).length) { setSaveState('saved'); return; }
+    if (!body || !Object.keys(body).length) return;
     try {
       const r = await fetch('/api/config', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ patch: body }),
       });
       const data = await r.json();
-      if (!r.ok) {
-        showValidation(data.errors || ['rejected']);
-        markFields('rejected');
-        setSaveState('unsaved', (data.errors || ['rejected'])[0]);
-        toast('Not applied: ' + (data.errors || ['rejected'])[0], true);
-        return;
-      }
+      if (!r.ok) { toast((data.errors || ['not applied'])[0], true); return; }
       cfg = data.config;
-      showValidation([]);
-      markFields('saved');
-      setSaveState('saved');
+      showSaved();
     } catch (err) {
-      markFields('rejected');
-      setSaveState('unsaved', err.message);
       toast('Not applied: ' + err.message, true);
     }
   };
   if (immediate) send(); else saveTimer = setTimeout(send, 350);
 }
 
-function showValidation(errors) {
-  const box = $('#validation');
-  if (!errors || !errors.length) {
-    box.innerHTML = '<div class="ok">Mapping valid — no gaps, no overlaps, totals match.</div>';
-    return;
-  }
-  box.innerHTML = errors.map((e) => `<div class="err">${e}</div>`).join('');
+/** Set one field, mutate the local mirror immediately, save debounced. */
+function set(path, value, immediate) {
+  const parts = path.split('.');
+  let cur = cfg;
+  for (let i = 0; i < parts.length - 1; i++) cur = cur[parts[i]];
+  cur[parts[parts.length - 1]] = value;
+  const patch = {};
+  let pcur = patch;
+  parts.forEach((p, i) => { pcur[p] = i === parts.length - 1 ? value : {}; pcur = pcur[p]; });
+  pushConfig(patch, immediate !== false);
+}
+function get(path) { return path.split('.').reduce((o, k) => (o == null ? o : o[k]), cfg); }
+
+let _savedTimer = null;
+function showSaved() {
+  const t = $('#toast');
+  clearTimeout(_savedTimer);
+  t.textContent = 'Saved'; t.className = ''; t.hidden = false;
+  _savedTimer = setTimeout(() => { t.hidden = true; }, 1300);
+}
+function toast(msg, bad) {
+  const t = $('#toast');
+  clearTimeout(_savedTimer);
+  t.textContent = msg; t.className = bad ? 'bad' : ''; t.hidden = false;
+  _savedTimer = setTimeout(() => { t.hidden = true; }, bad ? 3200 : 1300);
 }
 
-/* ---------- simple field binding ---------- */
+/* ---------- confirm dialog ---------- */
 
-function bindFields() {
-  $$('[data-path]').forEach((el) => {
-    const path = el.dataset.path;
-    const type = el.dataset.type || 'string';
-    const handler = () => {
-      let v;
-      if (type === 'bool') v = el.checked;
-      else if (type === 'int') v = parseInt(el.value, 10);
-      else if (type === 'float') v = parseFloat(el.value);
-      else if (type === 'apiver') v = el.value === '' ? null : parseInt(el.value, 10);
-      else v = el.value;
-      if ((type === 'int' || type === 'float') && Number.isNaN(v)) return;
-      setPath(cfg, path, v);
-      if (path === 'frames.mode') $('#mode-note').textContent = MODE_NOTES[v] || '';
-      if (path === 'mode') updatePresetVisibility();
-      if (path === 'led.count') { fitToLedCount(); renderEdges(); drawStatic(); pushConfig(edgePatch(), true); }
-      // Redraw instantly as any dimming setting (or the brightness it stacks
-      // with) is dragged, before the change is even saved - the whole point
-      // is seeing the effect of a slider without waiting on a round trip.
-      if (path.startsWith('dimming.') || path === 'colour.brightness') drawDimmingChart();
-      pushConfig(patchFrom(path, v), el.tagName === 'SELECT' || type === 'bool', el);
-    };
-    // Text fields commit on blur/Enter: typing an IP a character at a time
-    // must not push half-finished addresses at the poller.
-    const evt = el.type === 'text' || el.type === 'checkbox' || el.tagName === 'SELECT' ? 'change' : 'input';
-    el.addEventListener(evt, handler);
+function confirmAction(title, body, actionLabel, danger, onConfirm) {
+  confirmState = { title, body, actionLabel, danger, onConfirm };
+  renderConfirm();
+}
+function renderConfirm() {
+  const overlay = $('#confirm-overlay');
+  if (!confirmState) { overlay.hidden = true; return; }
+  overlay.hidden = false;
+  $('#confirm-title').textContent = confirmState.title;
+  $('#confirm-body').textContent = confirmState.body;
+  const ok = $('#confirm-ok');
+  ok.textContent = confirmState.actionLabel;
+  ok.style.background = confirmState.danger ? 'var(--err)' : 'var(--color-accent)';
+}
+function wireConfirmDialog() {
+  $('#confirm-cancel').addEventListener('click', () => { confirmState = null; renderConfirm(); });
+  $('#confirm-ok').addEventListener('click', () => {
+    const fn = confirmState && confirmState.onConfirm;
+    confirmState = null; renderConfirm();
+    if (fn) fn();
   });
 }
 
-function updatePresetVisibility() {
-  const hide = !(cfg && cfg.mode === 'preset');
-  $$('.preset-row').forEach((row) => { row.hidden = hide; });
-}
+/* ---------- edges (front/left/right/back canonical slots) ---------- */
 
-/* The picker appears twice (Controls, and the fuller Mode panel below it) so
-   both copies need the same options kept in sync. */
-function populatePresetSelect(m) {
-  const byHost = (m && m.presets) || {};
-  const entries = Object.values(byHost).find((p) => p && Object.keys(p).length) || {};
-  const ids = Object.keys(entries).sort((a, b) => +a - +b);
-  const current = String((cfg && cfg.preset_slot) || '');
-  const html = ids.length
-    ? ids.map((id) => `<option value="${id}"${id === current ? ' selected' : ''}>${id} — ${entries[id]}</option>`).join('')
-    : `<option value="${current || 0}">No presets found on the controller yet</option>`;
-  $$('.preset-select').forEach((sel) => {
-    if (document.activeElement === sel) return;   // do not fight an open picker
-    sel.innerHTML = html;
-  });
-}
+function edgeBySlot(slot) { return cfg.mapping.edges.find((e) => e.name === slot); }
+function presentSlots() { return SLOTS.filter((s) => edgeBySlot(s)); }
 
-function fillFields() {
-  updatePresetVisibility();
-  $$('[data-path]').forEach((el) => {
-    const v = getPath(cfg, el.dataset.path);
-    if (el.type === 'checkbox') el.checked = !!v;
-    else if (el.dataset.type === 'apiver') el.value = v == null ? '' : String(v);
-    else el.value = v == null ? '' : v;
-  });
-  $('#mode-note').textContent = MODE_NOTES[cfg.frames.mode] || '';
-  drawDimmingChart();
-}
-
-/* ---------- edges table ---------- */
-
-let detectedSides = [];
-
-function sourceOptions(current) {
-  const sides = detectedSides.length ? detectedSides : ['top', 'left', 'right'];
-  const opts = sides.concat(['synth_gradient', 'mirror_top', 'average', 'off']);
-  if (current && !opts.includes(current)) opts.unshift(current);
-  return opts.map((o) => `<option value="${o}"${o === current ? ' selected' : ''}>${o}</option>`).join('');
-}
-
-function refToText(ref) { return Array.isArray(ref) ? `${ref[0]}:${ref[1]}` : ''; }
-function textToRef(text) {
-  const m = String(text).split(':');
-  if (m.length !== 2) return null;
-  const n = parseInt(m[1], 10);
-  return Number.isNaN(n) ? null : [m[0].trim(), n];
-}
-
-let manualRanges = false;
-
-/* Edges are packed head-to-tail in list order. With starts derived rather than
-   typed, an overlap or a gap is not expressible — the only thing left to get
-   wrong is the total, and the budget bar shows that with a one-click fix. */
 function repack() {
-  if (manualRanges) return;
   let cursor = 0;
-  for (const e of cfg.mapping.edges) {
+  for (const slot of SLOTS) {
+    const e = edgeBySlot(slot);
+    if (!e) continue;
     e.pixel_start = cursor;
     cursor += Math.max(1, e.pixel_count | 0);
   }
+  cfg.mapping.edges.sort((a, b) => SLOTS.indexOf(a.name) - SLOTS.indexOf(b.name));
+  cfg.led.count = cursor;
+}
+function pushEdges(immediate) {
+  pushConfig({ mapping: { edges: cfg.mapping.edges }, led: { count: cfg.led.count } }, immediate !== false);
 }
 
-function assigned() {
-  return cfg.mapping.edges.reduce((n, e) => n + Math.max(0, e.pixel_count | 0), 0);
-}
-
-/* Absorb any shortfall or excess into the last edge, so the config is valid. */
-function fitToLedCount() {
-  const edges = cfg.mapping.edges;
-  if (!edges.length) return;
-  const last = edges[edges.length - 1];
-  const others = assigned() - Math.max(0, last.pixel_count | 0);
-  last.pixel_count = Math.max(1, cfg.led.count - others);
-  repack();
-}
-
-function renderBudget() {
-  const total = cfg.led.count;
-  const used = assigned();
-  const diff = total - used;
-  const box = $('#budget');
-  const edges = cfg.mapping.edges.slice();
-  const bar = edges.map((e, i) =>
-    `<i style="background:${EDGE_COLOURS[i % EDGE_COLOURS.length]};width:${(Math.max(0, e.pixel_count) / Math.max(total, used)) * 100}%"></i>`
-  ).join('') + (diff > 0 ? `<i style="background:#2a2f38;width:${(diff / Math.max(total, used)) * 100}%"></i>` : '');
-
-  box.className = 'budget ' + (diff === 0 ? 'ok' : 'off');
-  box.innerHTML =
-    `<span>Assigned <b>${used}</b> of ${total} pixels</span>` +
-    `<span class="bar">${bar}</span>` +
-    (diff === 0
-      ? '<b>exact</b>'
-      : `<b>${diff > 0 ? diff + ' unassigned' : (-diff) + ' over'}</b>` +
-        `<button class="tiny" id="budget-fix">Fit last edge</button>`);
-
-  const fix = $('#budget-fix');
-  if (fix) fix.addEventListener('click', () => { fitToLedCount(); renderEdges(); drawStatic(); pushConfig(edgePatch(), true); });
-}
-
-function edgePatch() { return { mapping: { edges: cfg.mapping.edges } }; }
-function targetPatch() { return { output: { targets: cfg.output.targets } }; }
-
-function syncStarts() {
-  document.querySelectorAll('#edge-rows [data-field="pixel_start"]').forEach((el) => {
-    const e = cfg.mapping.edges[+el.dataset.edge];
-    if (e && document.activeElement !== el) el.value = e.pixel_start;
-  });
-}
-
-function renderEdges() {
-  repack();
-  const body = $('#edge-rows');
-  body.innerHTML = '';
-  cfg.mapping.edges.forEach((e, i) => {
-    const isSynth = e.source === 'synth_gradient';
-    const isMirror = e.source === 'mirror_top';
-    const tr = document.createElement('tr');
-    tr.innerHTML = `
-      <td class="order">
-        <button class="tiny" data-move="${i}" data-dir="-1" ${i === 0 ? 'disabled' : ''}>&uarr;</button>
-        <button class="tiny" data-move="${i}" data-dir="1" ${i === cfg.mapping.edges.length - 1 ? 'disabled' : ''}>&darr;</button>
-      </td>
-      <td><input type="text" value="${e.name || ''}" data-edge="${i}" data-field="name"></td>
-      <td><input type="number" value="${e.pixel_start}" data-edge="${i}" data-field="pixel_start"
-                 ${manualRanges ? '' : 'readonly title="Derived from the edge order and counts. Tick “Manual pixel ranges” to edit."'}></td>
-      <td><input type="number" min="1" value="${e.pixel_count}" data-edge="${i}" data-field="pixel_count"></td>
-      <td><select data-edge="${i}" data-field="source">${sourceOptions(e.source)}</select></td>
-      <td><input type="text" value="${isSynth ? refToText(e.synth_from) : (isMirror ? (e.mirror_of || '') : '')}"
-                 data-edge="${i}" data-field="${isMirror ? 'mirror_of' : 'synth_from'}"
-                 ${isSynth || isMirror ? '' : 'disabled'} placeholder="${isMirror ? 'edge name' : 'right:-1'}"></td>
-      <td><input type="text" value="${isSynth ? refToText(e.synth_to) : ''}" data-edge="${i}" data-field="synth_to"
-                 ${isSynth ? '' : 'disabled'} placeholder="left:0"></td>
-      <td><input type="checkbox" ${e.source_reversed ? 'checked' : ''} data-edge="${i}" data-field="source_reversed"></td>
-      <td><input type="checkbox" ${e.output_reversed ? 'checked' : ''} data-edge="${i}" data-field="output_reversed"></td>
-      <td><input type="number" min="0" max="2" step="0.05"
-                 value="${e.brightness == null ? 1 : e.brightness}"
-                 data-edge="${i}" data-field="brightness" title="1 = normal, 0.5 = half, 0 = off"></td>
-      <td class="row-actions">
-        <button class="tiny" data-identify="${i}">Identify</button>
-        <button class="tiny danger" data-remove-edge="${i}">&times;</button>
-      </td>`;
-    body.appendChild(tr);
-  });
-
-  body.querySelectorAll('[data-edge]').forEach((el) => {
-    const e = cfg.mapping.edges[+el.dataset.edge];
-    const f = el.dataset.field;
-
-    /* Returns false while the field is mid-edit (empty box, half-typed ref),
-       so a transient value never reaches the config. */
-    const read = () => {
-      if (el.type === 'checkbox') { e[f] = el.checked; return true; }
-      if (f === 'pixel_count' || f === 'pixel_start') {
-        if (el.value.trim() === '') return false;
-        const n = parseInt(el.value, 10);
-        if (Number.isNaN(n)) return false;
-        e[f] = f === 'pixel_count' ? Math.max(1, n) : Math.max(0, n);
-        return true;
-      }
-      if (f === 'synth_from' || f === 'synth_to') {
-        const r = textToRef(el.value);
-        if (!r) return false;
-        e[f] = r; return true;
-      }
-      if (f === 'brightness') {
-        if (el.value.trim() === '') return false;
-        const n = parseFloat(el.value);
-        if (Number.isNaN(n)) return false;
-        e[f] = Math.max(0, Math.min(n, 2));
-        return true;
-      }
-      e[f] = el.value; return true;
-    };
-
-    // Live feedback while typing a number, WITHOUT rebuilding the table —
-    // a rebuild would destroy the input you are typing into after one digit.
-    if (el.type === 'number') {
-      el.addEventListener('input', () => {
-        if (!read()) return;
-        repack(); syncStarts(); renderBudget(); renderLegend(); drawStatic();
-      });
-    }
-
-    // Commit on blur/Enter (or immediately for checkboxes and selects).
-    el.addEventListener('change', () => {
-      if (!read()) { renderEdges(); return; }
-      repack(); renderEdges(); drawStatic();
-      pushConfig(edgePatch(), true);
-    });
-  });
-
-  body.querySelectorAll('[data-move]').forEach((b) => {
-    b.addEventListener('click', () => {
-      const i = +b.dataset.move, j = i + (+b.dataset.dir);
-      const edges = cfg.mapping.edges;
-      if (j < 0 || j >= edges.length) return;
-      [edges[i], edges[j]] = [edges[j], edges[i]];
-      repack(); renderEdges(); drawStatic(); pushConfig(edgePatch(), true);
-    });
-  });
-
-  body.querySelectorAll('[data-identify]').forEach((b) => {
-    b.addEventListener('click', () => {
-      const e = cfg.mapping.edges[+b.dataset.identify];
-      // Send the range explicitly: identify must work on the edge being edited,
-      // whether or not the config has been accepted yet.
-      sendWs({ type: 'identify', start: e.pixel_start, count: e.pixel_count,
-               seconds: 10, colour: [255, 255, 255] });
-      toast(`Lighting pixels ${e.pixel_start}–${e.pixel_start + e.pixel_count - 1} (“${e.name}”) for 10 s`);
-    });
-  });
-
-  body.querySelectorAll('[data-remove-edge]').forEach((b) => {
-    b.addEventListener('click', () => {
-      cfg.mapping.edges.splice(+b.dataset.removeEdge, 1);
-      fitToLedCount();
-      renderEdges(); drawStatic(); pushConfig(edgePatch(), true);
-    });
-  });
-
-  renderBudget();
-  renderLegend();
-}
-
-function renderTargets() {
-  const body = $('#target-rows');
-  body.innerHTML = '';
-  cfg.output.targets.forEach((t, i) => {
-    const tr = document.createElement('tr');
-    tr.innerHTML = `
-      <td><input type="text" value="${t.host || ''}" data-target="${i}" data-field="host"></td>
-      <td><input type="number" value="${t.port}" data-target="${i}" data-field="port"></td>
-      <td><input type="number" value="${t.http_port == null ? 80 : t.http_port}" data-target="${i}" data-field="http_port"></td>
-      <td><input type="number" value="${t.pixel_offset}" data-target="${i}" data-field="pixel_offset"></td>
-      <td><input type="number" value="${t.pixel_count}" data-target="${i}" data-field="pixel_count"></td>
-      <td><input type="checkbox" ${t.enabled !== false ? 'checked' : ''} data-target="${i}" data-field="enabled"></td>
-      <td><button class="tiny danger" data-remove-target="${i}">×</button></td>`;
-    body.appendChild(tr);
-  });
-  body.querySelectorAll('[data-target]').forEach((el) => {
-    const ev = el.type === 'text' || el.type === 'checkbox' ? 'change' : 'input';
-    el.addEventListener(ev, () => {
-      const t = cfg.output.targets[+el.dataset.target];
-      const f = el.dataset.field;
-      if (el.type === 'checkbox') t[f] = el.checked;
-      else if (f === 'host') t[f] = el.value;
-      else t[f] = parseInt(el.value, 10) || 0;
-      pushConfig(targetPatch(), ev === 'change', el);
-    });
-  });
-  body.querySelectorAll('[data-remove-target]').forEach((b) => {
-    b.addEventListener('click', () => {
-      cfg.output.targets.splice(+b.dataset.removeTarget, 1);
-      renderTargets(); pushConfig(targetPatch(), true);
-    });
-  });
-}
-
-const EDGE_COLOURS = ['#4da3ff', '#35c46b', '#f0b429', '#c46be0', '#f0553f', '#2ec4c4'];
-
-function renderLegend() {
-  $('#edge-legend').innerHTML = cfg.mapping.edges
-    .slice()
-    .sort((a, b) => a.pixel_start - b.pixel_start)
-    .map((e, i) => `<span><span class="swatch" style="background:${EDGE_COLOURS[i % EDGE_COLOURS.length]}"></span>${e.name} · ${e.pixel_start}–${e.pixel_start + e.pixel_count - 1} · ${e.source}</span>`)
-    .join('');
-  $('#strip-max').textContent = String(cfg.led.count - 1);
-}
-
-/* ---------- preview rendering ---------- */
-
-const ceiling = $('#ceiling');
-const cctx = ceiling.getContext('2d');
-const strip = $('#strip');
-const sctx = strip.getContext('2d');
-
-function sizeCanvas(cv, cssW, cssH) {
-  const dpr = window.devicePixelRatio || 1;
-  cv.style.height = cssH + 'px';
-  if (cv.width !== Math.round(cssW * dpr) || cv.height !== Math.round(cssH * dpr)) {
-    cv.width = Math.round(cssW * dpr);
-    cv.height = Math.round(cssH * dpr);
-  }
-  const ctx = cv.getContext('2d');
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  return ctx;
-}
-
-/* Rectangle geometry: 222 cm x 164 cm, drawn to fit the canvas. */
-function ceilingGeometry(w, h) {
-  const pad = 26;
-  const aspect = 222 / 164;
-  let rw = w - pad * 2;
-  let rh = rw / aspect;
-  if (rh > h - pad * 2) { rh = h - pad * 2; rw = rh * aspect; }
-  const x = (w - rw) / 2;
-  const y = (h - rh) / 2;
-  return { x, y, w: rw, h: rh };
-}
-
-/* Point on the rectangle perimeter, clockwise from the top-left corner. */
-function perimeterPoint(g, t) {
-  const per = 2 * (g.w + g.h);
-  let d = ((t % 1) + 1) % 1 * per;
-  if (d < g.w) return [g.x + d, g.y];
-  d -= g.w;
-  if (d < g.h) return [g.x + g.w, g.y + d];
-  d -= g.h;
-  if (d < g.w) return [g.x + g.w - d, g.y + g.h];
-  d -= g.w;
-  return [g.x, g.y + g.h - d];
-}
-
-/* With exactly four edges, honour each edge's own pixel count per side
-   (the sides have different pixel densities). Otherwise walk the perimeter. */
-function pixelPositions() {
-  const g = ceilingGeometry(ceiling.clientWidth, ceiling.clientWidth * 0.62);
-  const edges = cfg.mapping.edges.slice().sort((a, b) => a.pixel_start - b.pixel_start);
-  const total = cfg.led.count;
-  const pos = new Array(total);
-
-  if (edges.length === 4) {
-    const sides = [
-      { from: [g.x, g.y], to: [g.x + g.w, g.y] },                     // TV wall
-      { from: [g.x + g.w, g.y], to: [g.x + g.w, g.y + g.h] },         // right
-      { from: [g.x + g.w, g.y + g.h], to: [g.x, g.y + g.h] },         // rear
-      { from: [g.x, g.y + g.h], to: [g.x, g.y] },                     // left
-    ];
-    // Anchor the schematic to whichever edge carries the screen's top zones,
-    // so the drawing is not rotated when the strip starts on a side run.
-    let anchor = edges.findIndex((e) => e.source === 'top');
-    if (anchor < 0) anchor = 0;
-    edges.forEach((e, i) => {
-      const s = sides[(i - anchor + 4) % 4];
-      for (let k = 0; k < e.pixel_count; k++) {
-        const t = (k + 0.5) / e.pixel_count;
-        const idx = e.pixel_start + k;
-        if (idx < total) pos[idx] = [s.from[0] + (s.to[0] - s.from[0]) * t, s.from[1] + (s.to[1] - s.from[1]) * t];
-      }
-    });
+function toggleSlot(slot) {
+  const existing = edgeBySlot(slot);
+  if (existing) {
+    if (presentSlots().length === 1) { toast("At least one side has to stay on", true); return; }
+    cfg.mapping.edges = cfg.mapping.edges.filter((e) => e.name !== slot);
   } else {
-    for (let i = 0; i < total; i++) pos[i] = perimeterPoint(g, (i + 0.5) / total);
+    const src = SLOT_DEFAULT_SOURCE[slot];
+    const e = { name: slot, pixel_start: 0, pixel_count: 60, source: src, reversed: false, brightness: 1.0 };
+    if (src === 'synth_gradient') { e.synth_from = ['right', -1]; e.synth_to = ['left', 0]; }
+    if (src === 'mirror_top') e.mirror_of = 'front';
+    cfg.mapping.edges.push(e);
   }
-  for (let i = 0; i < total; i++) if (!pos[i]) pos[i] = [g.x, g.y];
-  return { g, pos };
+  repack();
+  pushEdges(true);
+}
+function editEdge(slot, patch) {
+  Object.assign(edgeBySlot(slot), patch);
+  repack();
+  pushEdges();
+}
+function flashSlot(slot) {
+  clearTimeout(window._flashTimer);
+  flashEdge = slot;
+  renderPreviewFromPixels();
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'identify', edge: slot, seconds: 3 }));
+  window._flashTimer = setTimeout(() => { flashEdge = ''; renderPreviewFromPixels(); }, 900);
 }
 
-let geomCache = null;
-function drawStatic() { geomCache = null; drawCeiling(); drawStrip(); }
+/* ---------- sliders (custom pointer drag, matches the design) ---------- */
 
-function drawCeiling() {
-  const w = ceiling.clientWidth || 640;
-  const h = Math.round(w * 0.62);
-  const ctx = sizeCanvas(ceiling, w, h);
-  if (!cfg) return;
-  if (!geomCache || geomCache.w !== w) { geomCache = { w, ...pixelPositions() }; }
-  const { g, pos } = geomCache;
-
-  ctx.clearRect(0, 0, w, h);
-  ctx.fillStyle = '#0b0d10';
-  ctx.fillRect(0, 0, w, h);
-
-  // Room outline and the TV, so orientation is never ambiguous.
-  ctx.strokeStyle = '#2a2f38';
-  ctx.lineWidth = 1;
-  ctx.strokeRect(g.x, g.y, g.w, g.h);
-  ctx.fillStyle = '#8b93a1';
-  ctx.font = '11px ui-sans-serif, system-ui, sans-serif';
-  ctx.textAlign = 'center';
-  ctx.fillText('TV wall', g.x + g.w / 2, g.y - 10);
-  ctx.fillText('rear (behind viewer)', g.x + g.w / 2, g.y + g.h + 18);
-  ctx.save();
-  ctx.translate(g.x - 12, g.y + g.h / 2); ctx.rotate(-Math.PI / 2);
-  ctx.fillText('left', 0, 0); ctx.restore();
-  ctx.save();
-  ctx.translate(g.x + g.w + 14, g.y + g.h / 2); ctx.rotate(Math.PI / 2);
-  ctx.fillText('right', 0, 0); ctx.restore();
-  ctx.fillStyle = '#3a4150';
-  ctx.fillRect(g.x + g.w / 2 - 34, g.y - 6, 68, 4);
-
-  const n = Math.min(cfg.led.count, pixels.length / 3 | 0);
-  const r = Math.max(2.2, g.w / cfg.led.count * 1.6);
-  for (let i = 0; i < n; i++) {
-    const p = pos[i];
-    if (!p) continue;
-    const o = i * 3;
-    ctx.fillStyle = `rgb(${pixels[o]},${pixels[o + 1]},${pixels[o + 2]})`;
-    ctx.beginPath();
-    ctx.arc(p[0], p[1], r, 0, Math.PI * 2);
-    ctx.fill();
-  }
-}
-
-function drawStrip() {
-  const w = strip.clientWidth || 640;
-  const ctx = sizeCanvas(strip, w, 34);
-  if (!cfg) return;
-  ctx.clearRect(0, 0, w, 34);
-  const total = cfg.led.count;
-  const bw = w / total;
-  const n = Math.min(total, pixels.length / 3 | 0);
-  for (let i = 0; i < n; i++) {
-    const o = i * 3;
-    ctx.fillStyle = `rgb(${pixels[o]},${pixels[o + 1]},${pixels[o + 2]})`;
-    ctx.fillRect(i * bw, 0, Math.max(bw, 1), 26);
-  }
-  // Edge boundaries, so a reversal or off-by-one is visible at a glance.
-  cfg.mapping.edges.slice().sort((a, b) => a.pixel_start - b.pixel_start).forEach((e, i) => {
-    ctx.fillStyle = EDGE_COLOURS[i % EDGE_COLOURS.length];
-    ctx.fillRect(e.pixel_start * bw, 27, Math.max(e.pixel_count * bw - 1, 1), 5);
-  });
-}
-
-/* ---------- metrics ---------- */
-
-function applyMetrics(m) {
-  if (!m) return;
-  $('#m-state').textContent = m.tv_state === 'streaming' ? 'streaming'
-    : m.tv_state === 'tv_off' ? 'TV off'
-    : m.tv_state === 'unconfigured' ? 'set a TV address'
-    : m.tv_state === 'ambilight_off' ? 'Ambilight off' : m.tv_state;
-  $('#m-state').className = 'state ' + m.tv_state;
-  $('#m-sfps').textContent = m.source_fps ? m.source_fps.toFixed(1) : '–';
-  $('#m-ofps').textContent = m.output_fps ? m.output_fps.toFixed(0) : '–';
-  $('#m-lat').textContent = m.source_latency_ms ? m.source_latency_ms.toFixed(0) + ' ms' : '–';
-  $('#m-fail').textContent = `${m.failed_polls} / ${m.total_polls}`;
-  $('#m-api').textContent = m.api_version ? 'v' + m.api_version : '–';
-
-  const amb = m.ambilight_power;
-  $('#m-amb').textContent = amb === true ? 'on' : amb === false ? 'off' : 'unknown';
-  $('#m-amb').className = 'state ' + (amb === true ? 'streaming' : amb === false ? 'tv_off' : '');
-
-  const targets = m.targets || {};
-  const hosts = Object.keys(targets);
-  const down = hosts.filter((h) => targets[h] === false);
-  $('#m-wled').textContent = !hosts.length ? '–'
-    : down.length === 0 ? 'reachable'
-    : down.length === hosts.length ? 'offline' : `${hosts.length - down.length}/${hosts.length} up`;
-  $('#m-wled').className = 'state ' + (down.length === 0 ? 'streaming' : 'error');
-
-  if (m.brightness_applied != null) {
-    const lvl = m.brightness_level, ap = m.brightness_applied;
-    $('#bri-applied').textContent = `${(ap * 100).toFixed(1)}% of full` +
-      (Math.abs(ap - lvl) > 0.001 ? ` (level ${lvl}, perceptual curve applied)` : '');
-  }
-
-  const d = m.dimming || {};
-  const sun = $('#sun-readout');
-  if (sun) {
-    if (!d.enabled) {
-      sun.innerHTML = 'Auto-dim is <b>off</b> — brightness follows the Colour panel only.';
-    } else if (d.polar) {
-      sun.innerHTML = `<b>${d.polar === 'polar_night' ? 'Polar night' : 'Polar day'}</b> — ` +
-        `holding level <b>${d.level}</b>.`;
-    } else {
-      const t = (iso) => iso ? new Date(iso).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'}) : '?';
-      sun.innerHTML = `Sunrise <b>${t(d.sunrise)}</b>, sunset <b>${t(d.sunset)}</b> — ` +
-        `curve at <b>${(d.day_fraction * 100).toFixed(0)}%</b> of peak, level <b>${d.level}</b>.`;
-    }
-  }
-
-  const ctl = Object.entries(m.controllers || {});
-  const first = ctl.length ? ctl[0][1] : null;
-  $('#m-cfps').textContent = first && first.fps != null ? first.fps : '–';
-  $('#m-pwr').textContent = first && first.power_ma != null ? first.power_ma + ' mA' : '–';
-
-  const cr = $('#controller-readout');
-  if (cr) {
-    if (!ctl.length) {
-      cr.textContent = 'No controller telemetry yet.';
-    } else {
-      cr.innerHTML = ctl.map(([host, i]) => {
-        const limited = i.brightness_limited
-          ? ' <b style="color:var(--warn)">ABL limiting</b>' : '';
-        const src = i.realtime ? `realtime from <b>${i.realtime_source || '?'}</b>` : 'idle';
-        return `<div><b>${host}</b> — WLED ${i.version || '?'}, ${i.led_count || '?'} LEDs, ` +
-               `rendering <b>${i.fps != null ? i.fps : '?'}</b> fps, drawing <b>${i.power_ma != null ? i.power_ma : '?'}</b> mA, ` +
-               `${src}${limited}</div>`;
-      }).join('');
-    }
-    if (m.output_conflict) {
-      cr.innerHTML += `<div class="err" style="margin-top:6px">Conflict: ${m.output_conflict}. ` +
-                      `Two sources are driving the strip; expect flicker.</div>`;
-    }
-  }
-
-  if (m.mode) {
-    $('#m-mode').textContent = m.mode;
-    $('#m-mode').className = 'state ' + (m.mode === 'off' ? 'tv_off' : 'streaming');
-  }
-  const q = m.mqtt || {};
-  const mr = $('#mqtt-readout');
-  if (mr) {
-    if (!q.enabled) mr.textContent = 'MQTT is off. Home Assistant will not see this device.';
-    else if (q.connected) {
-      mr.innerHTML = `Connected to <b>${q.host}</b> — published <b>${q.publishes}</b> updates, ` +
-                     `received <b>${q.commands}</b> commands. Topics under <code>${q.base_topic}/</code>.`;
-    } else {
-      mr.innerHTML = `<span style="color:var(--bad)">Not connected to ${q.host}` +
-                     (q.last_error ? ` — ${q.last_error}` : '') + '</span>';
-    }
-  }
-
-  populatePresetSelect(m);
-  const presetReadout = $('#preset-readout');
-  if (presetReadout) {
-    if (m.mode !== 'preset') {
-      presetReadout.textContent = '';
-    } else if (m.preset_applied) {
-      presetReadout.innerHTML = `Active: <b>${m.preset_name || ('preset ' + m.preset_slot)}</b>`;
-    } else {
-      presetReadout.innerHTML = `<span style="color:var(--warn)">Applying preset ${m.preset_slot}…</span>` +
-        (m.preset_error ? ` &mdash; ${m.preset_error}` : '');
-    }
-  }
-
-  $('#m-emit').textContent = m.emitting ? 'yes' : 'no';
-  $('#m-emit').className = 'state ' + (m.emitting ? 'streaming' : 'tv_off');
-
-  const sides = m.layout || {};
-  const text = Object.keys(sides).length
-    ? Object.entries(sides).map(([k, v]) => `${k} = ${v}`).join(', ') +
-      ` (${Object.values(sides).reduce((a, b) => a + b, 0)} zones)`
-    : 'unknown — TV not reachable yet';
-  $('#layout').textContent = text;
-  const known = Object.keys(sides);
-  if (known.length && known.join() !== detectedSides.join()) {
-    detectedSides = known;
-    renderEdges();
-  }
-  if (m.mapping_problems && m.mapping_problems.length) showValidation(m.mapping_problems);
-}
-
-/* ---------- websocket ---------- */
-
-let ws = null;
-function sendWs(obj) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); }
-
-function connect() {
-  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  ws = new WebSocket(`${proto}://${location.host}/ws`);
-  ws.binaryType = 'arraybuffer';
-  ws.onopen = () => { $('#m-ws').textContent = 'live'; $('#m-ws').className = 'state open'; };
-  ws.onclose = () => {
-    $('#m-ws').textContent = 'reconnecting'; $('#m-ws').className = 'state closed';
-    setTimeout(connect, 1500);
+function wireSlider(track, thumb, fill, thumbSize, getPct, setPct) {
+  const paint = (pct) => {
+    fill.style.width = pct + '%';
+    thumb.style.left = `calc((100% - ${thumbSize}px) * ${clamp(pct, 0, 100) / 100})`;
   };
-  ws.onmessage = (ev) => {
-    if (typeof ev.data === 'string') {
-      const msg = JSON.parse(ev.data);
-      if (msg.type === 'metrics') applyMetrics(msg);
-      else if (msg.type === 'hello' && !cfg) { cfg = msg.config; renderAll(); }
-      return;
-    }
-    pixels = new Uint8Array(ev.data);
-    drawCeiling();
-    drawStrip();
+  const fromEvent = (ev) => {
+    const r = track.getBoundingClientRect();
+    return clamp(Math.round(((ev.clientX - r.left) / r.width) * 100), 0, 100);
   };
-}
-
-/* ---------- wiring ---------- */
-
-function renderAll() {
-  fillFields();
-  renderEdges();
-  renderTargets();
-  drawStatic();
-}
-
-$('#add-edge').addEventListener('click', () => {
-  const edges = cfg.mapping.edges;
-  const leftover = Math.max(1, cfg.led.count - assigned());
-  edges.push({
-    name: `edge_${edges.length + 1}`, pixel_start: assigned(), pixel_count: leftover,
-    source: detectedSides[0] || 'top', source_reversed: false, output_reversed: false,
+  track.addEventListener('pointerdown', (ev) => {
+    try { track.setPointerCapture(ev.pointerId); } catch (e) {}
+    const pct = fromEvent(ev); paint(pct); setPct(pct);
   });
-  repack(); renderEdges(); drawStatic(); pushConfig(edgePatch(), true);
-});
+  track.addEventListener('pointermove', (ev) => {
+    if (!ev.buttons) return;
+    const pct = fromEvent(ev); paint(pct); setPct(pct);
+  });
+  paint(getPct());
+  return paint;
+}
 
-$('#fit-edges').addEventListener('click', () => {
-  fitToLedCount(); renderEdges(); drawStatic(); pushConfig(edgePatch(), true);
-  toast('Last edge resized to fill the strip');
-});
+/* ---------- clock / preview ---------- */
 
-$('#manual-ranges').addEventListener('change', (ev) => {
-  manualRanges = ev.target.checked;
-  renderEdges();
-});
+function renderClock() {
+  const c = $('#clock');
+  if (c) c.textContent = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
 
-$('#add-target').addEventListener('click', () => {
-  cfg.output.targets.push({ host: '', port: 21324, http_port: 80, pixel_offset: 0, pixel_count: cfg.led.count, enabled: false });
-  renderTargets();
-});
+function edgeAverageColour(slot) {
+  const e = edgeBySlot(slot);
+  if (!e || e.source === 'off' || !pixels.length) return null;
+  const start = e.pixel_start * 3, count = e.pixel_count;
+  if (start + count * 3 > pixels.length) return null;
+  let r = 0, g = 0, b = 0;
+  for (let i = 0; i < count; i++) { r += pixels[start + i * 3]; g += pixels[start + i * 3 + 1]; b += pixels[start + i * 3 + 2]; }
+  r = Math.round(r / count); g = Math.round(g / count); b = Math.round(b / count);
+  return `rgb(${r},${g},${b})`;
+}
 
-async function pushLayout(mode, question) {
-  if (!confirm(question)) return;
-  const savePreset = $('#save-preset') && $('#save-preset').checked;
-  const qs = 'mode=' + mode + (savePreset ? '&preset=2' : '');
+function paintPreview(prefix) {
+  const on = get('mode') !== 'off';
+  for (const slot of SLOTS) {
+    const poly = $(`#${prefix}-${slot}`);
+    const line = $(`#${prefix}-${slot}-ln`);
+    const e = edgeBySlot(slot);
+    let colour = 'transparent', opacity = 0;
+    if (flashEdge === slot) { colour = '#ffffff'; opacity = 1; }
+    else if (e && e.source !== 'off' && on) {
+      colour = edgeAverageColour(slot) || SLOT_COLOUR[slot];
+      opacity = 0.85;
+    } else if (e && e.source !== 'off') {
+      colour = SLOT_COLOUR[slot]; opacity = 0.08;
+    }
+    if (poly) { poly.setAttribute('fill', colour); poly.setAttribute('opacity', opacity); }
+    if (line) { line.setAttribute('stroke', colour); line.setAttribute('stroke-opacity', opacity); }
+  }
+}
+function renderPreviewFromPixels() {
+  if (!cfg) return;
+  paintPreview('pv');
+  if (wiz) paintPreview('wz');
+  const veil = $('#preview-veil');
+  if (veil) veil.style.opacity = get('mode') === 'off' ? 0.7 : 0;
+}
+
+/* ---------- live (metrics-driven, no full re-render) ---------- */
+
+function renderLive() {
+  renderPreviewFromPixels();
+  const on = get('mode') !== 'off';
+  const emitting = !!metrics.emitting;
+  const line = $('#status-line'), sub = $('#status-sub');
+  if (line) {
+    if (!on) { line.textContent = 'The ceiling is off.'; }
+    else if (metrics.tv_state && metrics.tv_state !== 'streaming') { line.textContent = "Waiting for the TV…"; }
+    else if (!emitting) { line.textContent = "Can't reach the lights."; }
+    else { line.textContent = 'Your ceiling is following the telly.'; }
+  }
+  if (sub) {
+    sub.hidden = on;
+    sub.textContent = 'Tap the big button to turn it back on.';
+  }
+
+  if (advanced && page === 'source') {
+    const meta = $('#source-meta');
+    if (meta) meta.textContent = `API v${metrics.api_version || '?'} · polling at ${cfg.source.poll_hz} fps · `
+      + `${metrics.source_latency_ms ?? '–'} ms · ${metrics.failed_polls ?? 0} failed`;
+  }
+  if (advanced && page === 'output') {
+    const s = $('#output-summary');
+    if (s) {
+      const online = metrics.targets_online || 0;
+      const total = presentSlots().reduce((n, sl) => n + edgeBySlot(sl).pixel_count, 0);
+      s.textContent = `${presentSlots().length} segments · ${total} LEDs · ${online} controller${online === 1 ? '' : 's'} reachable`;
+    }
+    const dot = $('#output-dot');
+    if (dot) dot.classList.toggle('bad', !(metrics.targets_online > 0));
+  }
+  if (advanced && page === 'config') {
+    const d = $('#diag-box');
+    if (d) d.textContent = diagText();
+  }
+  if (advanced && page === 'mapping') {
+    // per-row live readouts only; full rebuild happens on structural change
+  }
+}
+
+function diagText() {
+  const m = metrics;
+  return `ws   /ws        open · ${m.source_fps ?? 0} fps in · ${m.output_fps ?? 0} fps out\n`
+    + `tv   ${cfg.source.tv_ip || '(not set)'} ${m.tv_state || '?'} · ${m.source_latency_ms ?? '–'} ms · ${m.failed_polls ?? 0} failed polls\n`
+    + `wled ${(cfg.output.targets[0] || {}).host || '(not set)'} ${metrics.targets_online ? 'ok' : 'unreachable'}\n`
+    + `mqtt ${cfg.mqtt.enabled ? (metrics.mqtt && metrics.mqtt.connected ? 'connected' : 'connecting') : 'disabled'}`;
+}
+
+/* ================= SIMPLE VIEW ================= */
+
+function renderSimple() {
+  const on = get('mode') !== 'off';
+  const sw = $('#power-switch');
+  sw.classList.toggle('on', on);
+  $('#power-label').textContent = on ? 'On' : 'Off';
+
+  const bright = Math.round((cfg.colour.brightness || 0) * 100);
+  $('#bright-label').textContent = bright + '%';
+  const level = (metrics.dimming && metrics.dimming.level != null) ? metrics.dimming.level : 1.0;
+  const eff = Math.round(level * bright);
+  $('#bright-eff').textContent = cfg.dimming.enabled ? `→ ${eff}% out` : '';
+  wireSlider($('#bright-slider'), $('#bright-thumb'), $('#bright-fill'), 34,
+    () => bright,
+    (pct) => { $('#bright-label').textContent = pct + '%'; set('colour.brightness', pct / 100); });
+
+  $('#brightness-block').classList.toggle('dim', !on);
+
+  const dim = $('#autodim-toggle');
+  dim.classList.toggle('on', !!cfg.dimming.enabled);
+
+  renderLive();
+}
+
+function wireStaticControls() {
+  $('#power-switch').addEventListener('click', () => { set('mode', get('mode') === 'off' ? 'ambilight' : 'off', true); renderSimple(); });
+  $('#autodim-toggle').addEventListener('click', () => {
+    set('dimming.enabled', !cfg.dimming.enabled, true); renderSimple();
+    if (advanced && page === 'dim') renderPage();
+  });
+  $('#theme-toggle').addEventListener('click', () => {
+    const cur = document.documentElement.getAttribute('data-theme')
+      || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+    const next = cur === 'dark' ? 'light' : 'dark';
+    document.documentElement.setAttribute('data-theme', next);
+    localStorage.setItem('ambiwled.theme', next);
+  });
+  $('#open-advanced').addEventListener('click', () => { setAdvanced(true); });
+  $('#back-to-simple').addEventListener('click', () => { setAdvanced(false); });
+  wireConfirmDialog();
+  wireWizardFooter();
+  $('#import-file').addEventListener('change', onImportFile);
+}
+
+function setAdvanced(on) {
+  advanced = on;
+  localStorage.setItem('ambiwled.mode', on ? 'advanced' : 'simple');
+  $('#simple-view').hidden = on || !!wiz;
+  $('#advanced-view').hidden = !on || !!wiz;
+  // Mode (on/off, ambilight/preset) is editable from Advanced's Colour page
+  // too - the Simple view has to catch up on return, not just when it was
+  // the one making the change.
+  renderSimple();
+  if (on) { renderTabs(); renderPage(); }
+}
+
+/* ================= ADVANCED SHELL ================= */
+
+function renderTabs() {
+  const bar = $('#tab-bar');
+  bar.innerHTML = '';
+  for (const [id, label] of TABS) {
+    const b = el('button', {
+      class: 'tab-btn' + (page === id ? ' active' : ''),
+      onclick: () => { page = id; renderTabs(); renderPage(); },
+    }, label);
+    bar.append(b);
+  }
+}
+
+function renderPage() {
+  const body = $('#page-body');
+  body.innerHTML = '';
+  const renderers = {
+    home: pageHome, colour: pageColour, dim: pageDim, source: pageSource,
+    mapping: pageMapping, output: pageOutput, frames: pageFrames,
+    integrations: pageIntegrations, config: pageConfig,
+  };
+  (renderers[page] || pageHome)(body);
+  renderLive();
+}
+
+/* -- Home: live summary -- */
+
+function pageHome(body) {
+  body.append(el('div', { class: 'page' },
+    el('div', { class: 'ambient-strip' },
+      el('div', { class: 'caption' }, 'live · one websocket')),
+    el('div', { class: 'summary-list', id: 'summary-list' }),
+    el('div', { class: 'field-hint' }, 'The preview keeps streaming while you move between these pages — one socket, never renegotiated.'),
+  ));
+  renderSummaryRows();
+}
+function renderSummaryRows() {
+  const list = $('#summary-list');
+  if (!list) return;
+  const total = presentSlots().reduce((n, s) => n + edgeBySlot(s).pixel_count, 0);
+  const rows = [
+    ['Mode', ({ ambilight: 'Follow the TV', preset: 'Hold a WLED preset', off: 'Off' })[cfg.mode]],
+    ['Colour strength', (cfg.colour.saturation).toFixed(2) + '×'],
+    ['Frames', `${cfg.source.poll_hz} fps in → ${cfg.frames.output_fps} out`],
+    ['Brightness', Math.round(cfg.colour.brightness * 100) + '% master'],
+    ['Auto-dim', cfg.dimming.enabled ? `On · ${Math.round(cfg.dimming.day_level * 100)}% day / ${Math.round(cfg.dimming.night_level * 100)}% night` : 'Off'],
+    ['Ceiling', `${presentSlots().length} sides · ${total} LEDs`],
+    ['MQTT', cfg.mqtt.enabled ? 'Enabled' : 'Off'],
+  ];
+  list.innerHTML = '';
+  for (const [k, v] of rows) {
+    list.append(el('div', { class: 'summary-row' }, el('span', { class: 'k' }, k), el('span', { class: 'v' }, v)));
+  }
+}
+
+/* -- Colour -- */
+
+function pageColour(body) {
+  const modes = [
+    ['ambilight', 'Follow the TV', 'Colour comes from what is on screen'],
+    ['preset', 'Hold a WLED preset', 'Leaves the strip on whatever WLED is doing'],
+    ['off', 'Off', 'Nothing is sent to the controller'],
+  ];
+  const modeWrap = el('div', { style: 'display:flex;flex-direction:column;gap:8px' });
+  for (const [id, label, hint] of modes) {
+    modeWrap.append(el('button', {
+      class: 'option-btn' + (cfg.mode === id ? ' active' : ''),
+      onclick: () => { set('mode', id, true); renderPage(); renderSimple(); },
+    }, el('span', { class: 'dot' }), el('span', { class: 'label' },
+      el('span', { class: 'name' }, label), el('span', { class: 'hint' }, hint))));
+  }
+
+  const page1 = el('div', { class: 'page' },
+    el('div', {}, el('div', { class: 'section-title' }, 'Mode'), modeWrap),
+    el('div', {},
+      el('div', { class: 'field-title' }, el('span', { class: 'name' }, 'Colour strength'),
+        el('span', { class: 'value', id: 'strength-label' })),
+      el('div', { class: 'slider small', id: 'strength-track' },
+        el('div', { class: 'fill-track' }, el('div', { class: 'fill', id: 'strength-fill', style: 'background:linear-gradient(90deg,#8d8d8d,#e2557a 55%,#ff8a3d)' })),
+        el('div', { class: 'thumb', id: 'strength-thumb' })),
+      el('div', { style: 'display:flex;justify-content:space-between;font-size:12px;opacity:.5;margin-top:7px' },
+        el('span', {}, 'Grey'), el('span', {}, 'As filmed'), el('span', {}, 'Vivid'))),
+    el('div', {},
+      el('div', { class: 'field-title' }, el('span', { class: 'name' }, 'Black floor'),
+        el('span', { class: 'value', id: 'floor-label' })),
+      el('div', { class: 'slider small', id: 'floor-track' },
+        el('div', { class: 'fill-track' }, el('div', { class: 'fill', id: 'floor-fill', style: 'background:linear-gradient(90deg,#2b2622,var(--color-accent-2))' })),
+        el('div', { class: 'thumb', id: 'floor-thumb' })),
+      el('div', { class: 'field-hint' }, 'Stops very dark scenes flickering on some strips.')),
+  );
+  body.append(page1);
+
+  const strengthPct = Math.round((cfg.colour.saturation || 1) * 50);
+  $('#strength-label').textContent = (cfg.colour.saturation).toFixed(2) + '×';
+  wireSlider($('#strength-track'), $('#strength-thumb'), $('#strength-fill'), 30,
+    () => strengthPct,
+    (pct) => { $('#strength-label').textContent = (pct / 50).toFixed(2) + '×'; set('colour.saturation', pct / 50); });
+
+  const floorPct = Math.round(((cfg.colour.black_floor || 0) / 255) * 100);
+  $('#floor-label').textContent = floorPct + '%';
+  wireSlider($('#floor-track'), $('#floor-thumb'), $('#floor-fill'), 30,
+    () => floorPct,
+    (pct) => { $('#floor-label').textContent = pct + '%'; set('colour.black_floor', Math.round((pct / 100) * 255)); });
+}
+
+/* -- Auto-dim -- */
+
+function pageDim(body) {
+  const wrap = el('div', { class: 'page' },
+    el('div', { class: 'toggle-row' },
+      el('span', { class: 'name' }, 'Dim by the sun'),
+      el('button', { class: 'toggle-switch' + (cfg.dimming.enabled ? ' on' : ''), id: 'dim-toggle-adv' }, el('span', { class: 'knob' }))),
+    el('div', { id: 'dim-body', style: cfg.dimming.enabled ? '' : 'opacity:.4' }),
+  );
+  body.append(wrap);
+  $('#dim-toggle-adv').addEventListener('click', () => { set('dimming.enabled', !cfg.dimming.enabled, true); renderPage(); renderSimple(); });
+
+  const dimBody = $('#dim-body');
+  dimBody.append(
+    el('div', { class: 'curve-card' },
+      el('div', { class: 'curve-head' }, el('span', { class: 'label' }, 'Next 24 hours'), el('span', { class: 'now', id: 'curve-now' })),
+      el('div', { class: 'curve-wrap', id: 'curve-wrap' })),
+    el('div', {},
+      el('div', { class: 'field-title' }, el('span', { class: 'name' }, 'Day level'), el('span', { class: 'value', id: 'day-label' })),
+      el('div', { class: 'slider small', id: 'day-track' }, el('div', { class: 'fill-track' }, el('div', { class: 'fill', id: 'day-fill' })), el('div', { class: 'thumb', id: 'day-thumb' })),
+      el('div', { class: 'field-hint' }, 'The top of the arch, at solar noon.')),
+    el('div', {},
+      el('div', { class: 'field-title' }, el('span', { class: 'name' }, 'Night level'), el('span', { class: 'value', id: 'night-label' })),
+      el('div', { class: 'slider small', id: 'night-track' }, el('div', { class: 'fill-track' }, el('div', { class: 'fill', id: 'night-fill' })), el('div', { class: 'thumb', id: 'night-thumb' })),
+      el('div', { class: 'field-hint' }, 'The floor, from sunset to sunrise.')),
+    el('div', { class: 'field' }, el('label', {}, 'Location'),
+      el('input', { class: 'input', id: 'loc-input', placeholder: 'Paste coordinates or a map link', value: locationText() })),
+    el('div', { class: 'row-actions', style: 'display:flex;gap:8px' },
+      el('button', { class: 'pill-btn soft', id: 'use-location' }, 'Use my location')),
+    el('div', { class: 'field-hint', id: 'sun-line' }),
+    el('div', { class: 'note-card' }, el('span', { id: 'master-note' })),
+    el('div', { class: 'field-hint' }, 'The level is recalculated every minute and follows the curve, so it never steps — there is nothing to schedule.'),
+  );
+
+  const dayPct = Math.round((cfg.dimming.day_level || 1) * 100);
+  const nightPct = Math.round((cfg.dimming.night_level || 0) * 100);
+  $('#day-label').textContent = dayPct + '%';
+  $('#night-label').textContent = nightPct + '%';
+  wireSlider($('#day-track'), $('#day-thumb'), $('#day-fill'), 30,
+    () => Math.round((cfg.dimming.day_level || 1) * 100),
+    (pct) => { const v = Math.max(pct, Math.round(cfg.dimming.night_level * 100) + 1) / 100; $('#day-label').textContent = Math.round(v * 100) + '%'; set('dimming.day_level', v); drawDimChart(); });
+  wireSlider($('#night-track'), $('#night-thumb'), $('#night-fill'), 30,
+    () => Math.round((cfg.dimming.night_level || 0) * 100),
+    (pct) => { const v = Math.min(pct, Math.round(cfg.dimming.day_level * 100) - 1) / 100; $('#night-label').textContent = Math.round(v * 100) + '%'; set('dimming.night_level', v); drawDimChart(); });
+
+  $('#use-location').addEventListener('click', () => useMyLocation($('#use-location')));
+  const locInput = $('#loc-input');
+  locInput.addEventListener('keydown', (ev) => {
+    if (ev.key !== 'Enter' && ev.key !== 'Go' && ev.keyCode !== 13) return;
+    ev.preventDefault(); submitLocationText(locInput);
+  });
+  locInput.addEventListener('change', () => submitLocationText(locInput));
+
+  updateMasterNote();
+  drawDimChart();
+}
+
+function locationText() {
+  const lat = cfg.dimming.latitude, lon = cfg.dimming.longitude;
+  if (!lat && !lon) return '';
+  return `${lat}, ${lon}`;
+}
+function updateMasterNote() {
+  const n = $('#master-note');
+  if (!n) return;
+  const level = (metrics.dimming && metrics.dimming.level != null) ? metrics.dimming.level : cfg.dimming.day_level;
+  const bright = Math.round((cfg.colour.brightness || 1) * 100);
+  const eff = Math.round(level * bright);
+  n.textContent = cfg.dimming.enabled
+    ? `Day and night levels are the schedule. The Brightness dial on the Home page is a master on top of it — at ${bright}% the ceiling is putting out ${eff}% right now, against a scheduled ${Math.round(level * 100)}%.`
+    : `With dimming off, the Brightness dial on the Home page is the only level — the ceiling sits at ${bright}% all day.`;
+  const sun = $('#sun-line');
+  if (sun && metrics.dimming) {
+    if (metrics.dimming.sunrise && metrics.dimming.sunset) {
+      const fmt = (iso) => new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      sun.textContent = `Sunrise ${fmt(metrics.dimming.sunrise)} · sunset ${fmt(metrics.dimming.sunset)}.`;
+    } else if (metrics.dimming.polar) {
+      sun.textContent = metrics.dimming.polar === 'polar_day' ? 'The sun never sets here right now.' : 'The sun never rises here right now.';
+    }
+  }
+}
+
+/* -- Source -- */
+
+function pageSource(body) {
+  body.append(el('div', { class: 'page' },
+    el('div', { class: 'status-pill' },
+      el('span', { class: 'dot', id: 'tv-dot' }),
+      el('span', { class: 'body' }, el('span', { class: 'name' }, cfg.source.tv_ip ? 'Television' : 'No TV set yet'),
+        el('span', { class: 'meta', id: 'source-meta' }))),
+    el('div', { class: 'field' }, el('label', {}, 'TV address'),
+      el('input', { class: 'input', id: 'tv-ip', value: cfg.source.tv_ip, placeholder: '192.168.1.44' })),
+    el('div', { class: 'field-hint' }, 'Saved when you tap away from the field, never mid-typing.'),
+    el('div', {},
+      el('div', { class: 'field-title' }, el('span', { class: 'name' }, 'How often we ask the TV'), el('span', { class: 'value' }, cfg.source.poll_hz + ' fps')),
+      el('div', { class: 'field-hint' }, pollHint()),
+      el('div', { class: 'chip-row', id: 'poll-chips' })),
+    el('div', { class: 'field-hint', id: 'poll-warn' }),
+  ));
+
+  const tvIp = $('#tv-ip');
+  tvIp.addEventListener('change', () => { set('source.tv_ip', tvIp.value.trim(), true); pageSourceMeta(); });
+
+  const chips = $('#poll-chips');
+  for (const v of [10, 15, 20, 25, 30]) {
+    chips.append(el('button', {
+      class: 'chip-btn' + (cfg.source.poll_hz === v ? ' active' : ''),
+      onclick: () => {
+        const mult = Math.max(1, Math.min(Math.floor(120 / v), Math.round(cfg.frames.output_fps / v)));
+        set('source.poll_hz', v);
+        set('frames.output_fps', mult * v, true);
+        renderPage();
+      },
+    }, v + ' fps'));
+  }
+  pollWarn();
+  pageSourceMeta();
+}
+function pollHint() { return 'Frames a second read off the TV. Frame generation fills the gap between this and what the strip gets.'; }
+function pollWarn() {
+  const w = $('#poll-warn');
+  if (!w) return;
+  w.textContent = cfg.source.poll_hz >= 25
+    ? 'Fast, but not every TV keeps up — if the log starts showing failed polls, come back down to 20.'
+    : cfg.source.poll_hz <= 10
+      ? 'Very light on the TV. Colour changes will visibly step unless frame generation smooths it.'
+      : '20 is the safe default — almost every set manages it.';
+}
+function pageSourceMeta() {
+  const dot = $('#tv-dot');
+  if (dot) dot.classList.toggle('bad', metrics.tv_state !== 'streaming');
+  renderLive();
+}
+
+/* -- Mapping -- */
+
+function pageMapping(body) {
+  const wrap = el('div', { class: 'page' },
+    el('div', {},
+      el('div', { class: 'section-title' }, 'Which sides have strip'),
+      el('div', { class: 'field-hint', id: 'sides-summary' }),
+      el('div', { class: 'two-col', id: 'side-toggles', style: 'margin-top:10px' })),
+    el('div', { style: 'height:1px;background:var(--color-divider)' }),
+    el('div', { class: 'field-hint', id: 'total-label' }),
+    el('div', { id: 'edge-rows', style: 'display:flex;flex-direction:column;gap:12px' }),
+  );
+  body.append(wrap);
+  renderSideToggles();
+  renderTotalLabel();
+  renderEdgeRows();
+}
+function renderSideToggles() {
+  const box = $('#side-toggles');
+  box.innerHTML = '';
+  for (const slot of SLOTS) {
+    const present = !!edgeBySlot(slot);
+    box.append(el('button', {
+      class: 'side-btn' + (present ? ' active' : ''),
+      onclick: () => { toggleSlot(slot); renderPage(); renderPreviewFromPixels(); },
+    }, el('span', { class: 'dot', style: present ? `background:${SLOT_COLOUR[slot]};box-shadow:0 0 9px ${SLOT_COLOUR[slot]}` : '' }),
+       el('span', { class: 'name' }, SLOT_LABEL[slot])));
+  }
+}
+function renderTotalLabel() {
+  const total = presentSlots().reduce((n, s) => n + edgeBySlot(s).pixel_count, 0);
+  const s1 = $('#sides-summary'), t1 = $('#total-label');
+  if (s1) s1.textContent = presentSlots().length === 1 ? 'One run of strip. Everything else stays dark.'
+    : `${presentSlots().length} sides · ${presentSlots().map((s) => SLOT_LABEL[s]).join(' · ')}`;
+  if (t1) t1.textContent = `${total} LEDs, packed head to tail in this order — no gaps possible.`;
+}
+function renderEdgeRows() {
+  const box = $('#edge-rows');
+  box.innerHTML = '';
+  for (const slot of presentSlots()) {
+    const e = edgeBySlot(slot);
+    const live = e.source !== 'off';
+    const card = el('div', { class: 'edge-card' },
+      el('div', { class: 'head' },
+        el('span', { class: 'dot', style: `background:${SLOT_COLOUR[slot]};box-shadow:0 0 9px ${SLOT_COLOUR[slot]}` }),
+        el('span', { class: 'name' }, SLOT_LABEL[slot]),
+        el('button', { class: 'pill-btn', onclick: () => flashSlot(slot) }, 'Identify')),
+      el('div', { class: 'edge-row' },
+        el('span', { class: 'label' }, `LEDs · from ${e.pixel_start}`),
+        el('button', { class: 'round-btn', onclick: () => { editEdge(slot, { pixel_count: Math.max(1, e.pixel_count - 1) }); renderPage(); } }, '−'),
+        el('span', { class: 'count-value' }, e.pixel_count),
+        el('button', { class: 'round-btn', onclick: () => { editEdge(slot, { pixel_count: e.pixel_count + 1 }); renderPage(); } }, '+')),
+      el('div', { class: 'edge-row' },
+        el('span', { class: 'label' }, 'Colour comes from'),
+        el('button', {
+          class: 'pill-btn', onclick: () => {
+            const i = SOURCE_OPTIONS.findIndex((o) => o[0] === e.source);
+            const next = SOURCE_OPTIONS[(i + 1) % SOURCE_OPTIONS.length][0];
+            const patch = { source: next };
+            if (next === 'synth_gradient' && !e.synth_from) { patch.synth_from = ['right', -1]; patch.synth_to = ['left', 0]; }
+            if (next === 'mirror_top' && !e.mirror_of) patch.mirror_of = 'front';
+            editEdge(slot, patch); renderPage();
+          },
+        }, (SOURCE_OPTIONS.find((o) => o[0] === e.source) || SOURCE_OPTIONS[0])[1])),
+    );
+    if (live) {
+      card.append(
+        el('div', { class: 'edge-row' },
+          el('span', { class: 'label' }, 'Strip direction'),
+          el('button', { class: 'pill-btn', onclick: () => { editEdge(slot, { reversed: !e.reversed }); renderPreviewFromPixels(); } }, 'Flip')),
+        el('div', {},
+          el('div', { style: 'display:flex;justify-content:space-between;font-size:13px;opacity:.6;margin-bottom:7px' },
+            el('span', {}, 'Brightness trim'), el('span', { id: `trim-label-${slot}` }, (e.brightness || 1).toFixed(2) + '×')),
+          el('div', { class: 'slider small', id: `trim-track-${slot}` },
+            el('div', { class: 'fill-track' }, el('div', { class: 'fill', id: `trim-fill-${slot}`, style: 'background:var(--color-accent-2);opacity:.65' })),
+            el('div', { class: 'thumb', id: `trim-thumb-${slot}` }))),
+      );
+    } else {
+      card.append(el('div', { class: 'dark-note' }, `These ${e.pixel_count} LEDs stay dark, so there is nothing to aim or trim. They still count towards the total.`));
+    }
+    box.append(card);
+    if (live) {
+      const pct = Math.round(((e.brightness || 1) / 2) * 100);
+      wireSlider($(`#trim-track-${slot}`), $(`#trim-thumb-${slot}`), $(`#trim-fill-${slot}`), 26,
+        () => pct,
+        (p) => { const v = (p / 100) * 2; $(`#trim-label-${slot}`).textContent = v.toFixed(2) + '×'; editEdge(slot, { brightness: v }); });
+    }
+  }
+}
+
+/* -- Output -- */
+
+function pageOutput(body) {
+  const target = cfg.output.targets[0] || { host: '', port: 21324, http_port: 80, enabled: false };
+  body.append(el('div', { class: 'page' },
+    el('div', { class: 'field' }, el('label', {}, 'WLED controller'),
+      el('input', { class: 'input', id: 'wled-host', value: target.host, placeholder: 'wled-ceiling.local' })),
+    el('div', { class: 'status-pill' },
+      el('span', { class: 'dot', id: 'output-dot' }),
+      el('span', { class: 'body' }, el('span', { class: 'name' }, 'Reachable'), el('span', { class: 'meta', id: 'output-summary' }))),
+    el('button', { class: 'cta-btn', onclick: () => confirmPush() }, 'Push segments to the controller'),
+    el('div', { class: 'field-hint' }, 'One segment per side, front to back — so WLED\'s own effects line up with your ceiling. Overwrites the layout stored on the device.'),
+  ));
+  const hostInput = $('#wled-host');
+  hostInput.addEventListener('change', () => {
+    const targets = cfg.output.targets.slice();
+    if (!targets.length) targets.push({ host: '', port: 21324, http_port: 80, pixel_offset: 0, pixel_count: cfg.led.count, enabled: false });
+    targets[0] = Object.assign({}, targets[0], { host: hostInput.value.trim(), enabled: !!hostInput.value.trim(), pixel_count: cfg.led.count });
+    set('output.targets', targets, true);
+  });
+  renderLive();
+}
+function confirmPush() {
+  confirmAction('Push segments?',
+    `The segment layout on the WLED controller will be overwritten with these ${presentSlots().length} sides.`,
+    'Push', false, async () => {
+      try {
+        const r = await fetch('/api/wled/segments?mode=front_to_back', { method: 'POST' });
+        const data = await r.json();
+        toast(data.ok ? 'Segments pushed' : 'Could not reach the controller', !data.ok);
+      } catch (err) { toast('Could not reach the controller', true); }
+    });
+}
+
+/* -- Frame generation -- */
+
+function pageFrames(body) {
+  const poll = cfg.source.poll_hz;
+  const mults = [];
+  for (let k = 1; k * poll <= 120; k++) mults.push(k * poll);
+  const cur = Math.max(0, mults.indexOf(cfg.frames.output_fps));
+  const madeUp = Math.max(0, Math.round(cfg.frames.output_fps / poll) - 1);
+
+  body.append(el('div', { class: 'page' },
+    el('div', {},
+      el('div', { class: 'field-title' }, el('span', { class: 'name' }, 'Frames sent to the strip'), el('span', { class: 'value' }, cfg.frames.output_fps + ' fps')),
+      el('div', { class: 'field-hint' }, madeUp === 0
+        ? `Straight through: the ${poll} frames a second your TV gives us are the ${poll} frames the strip gets.`
+        : `${poll} fps in → ${cfg.frames.output_fps} fps out, so ${madeUp === 1 ? 'one frame is' : madeUp + ' frames are'} made up between every real one.`),
+      el('div', { class: 'slider', id: 'fps-track' }, el('div', { class: 'fill-track' }, el('div', { class: 'fill', id: 'fps-fill' })), el('div', { class: 'thumb', id: 'fps-thumb' })),
+      el('div', { style: 'display:flex;justify-content:space-between;font-size:13px;opacity:.55;margin-top:8px' },
+        el('span', {}, `Coarse · ${poll} fps`), el('span', {}, 'Smooth')),
+      el('div', { class: 'fps-hist' },
+        el('div', { class: 'fps-bars', id: 'fps-bars' }),
+        el('div', { class: 'fps-legend' },
+          el('span', { class: 'sw' }, el('i', { style: 'background:var(--color-accent)' }), 'from the TV'),
+          el('span', { class: 'sw' }, el('i', { style: 'background:var(--color-accent-2)' }), 'made up in between'))),
+      el('div', { class: 'field-hint' }, madeUp === 0
+        ? `Every step in the colour is a real step in the picture. On a ${poll} fps feed you may see it march.`
+        : cfg.frames.output_fps >= 90 ? 'Motion looks continuous. Costs the most CPU on the box.' : 'Smoother than the feed without much extra work.')),
+    el('div', { class: 'callout' },
+      el('svg', { width: '18', height: '18', viewBox: '0 0 24 24', fill: 'none', stroke: 'var(--color-accent)', 'stroke-width': '2.75', 'stroke-linecap': 'round' }),
+      el('span', {}, "Turn WLED's own crossfade off while AmbiWled is streaming — two smoothing stages in a row turn the picture to mush.")),
+  ));
+
+  const pct = mults.length > 1 ? Math.round((cur / (mults.length - 1)) * 100) : 0;
+  wireSlider($('#fps-track'), $('#fps-thumb'), $('#fps-fill'), 32,
+    () => pct,
+    (p) => {
+      const idx = Math.round((p / 100) * (mults.length - 1));
+      set('frames.output_fps', mults[idx], true);
+      renderPage();
+    });
+
+  const bars = $('#fps-bars');
+  for (let i = 0; i < 24; i++) {
+    const real = madeUp === 0 || i % (madeUp + 1) === 0;
+    bars.append(el('div', { class: 'bar' + (real ? ' real' : ''), style: `height:${real ? 100 : 52}%` }));
+  }
+}
+
+/* -- Integrations (MQTT) -- */
+
+function pageIntegrations(body) {
+  const on = !!cfg.mqtt.enabled;
+  body.append(el('div', { class: 'page' },
+    el('div', { class: 'toggle-row' },
+      el('span', { class: 'name' }, 'Publish to MQTT'),
+      el('button', { class: 'toggle-switch' + (on ? ' on' : ''), onclick: () => { set('mqtt.enabled', !on, true); renderPage(); } },
+        el('span', { class: 'knob' }))),
+    el('div', { id: 'mqtt-body', style: on ? '' : 'opacity:.4' }),
+  ));
+  if (!on) return;
+  const b = $('#mqtt-body');
+  b.append(
+    el('div', { class: 'field' }, el('label', {}, 'Broker address'),
+      el('input', { class: 'input', id: 'mqtt-host', value: cfg.mqtt.host, placeholder: '192.168.1.10:1883' }),
+      el('div', { class: 'field-hint', id: 'mqtt-test-row' })),
+    el('div', { class: 'field' }, el('label', {}, 'Username'), el('input', { class: 'input', id: 'mqtt-user', value: cfg.mqtt.username })),
+    el('div', { class: 'field' }, el('label', {}, 'Password'),
+      el('div', { style: 'display:flex;gap:8px;align-items:center' },
+        el('input', { class: 'input', id: 'mqtt-pass', type: 'password', placeholder: pwEdit ? 'Enter new password' : '••••••••••', readonly: pwEdit ? undefined : 'readonly', style: `flex:1;${pwEdit ? '' : 'opacity:.6'}` }),
+        el('button', { class: 'pill-btn', onclick: () => { pwEdit = !pwEdit; renderPage(); } }, pwEdit ? 'Cancel' : 'Replace')),
+      el('div', { class: 'field-hint' }, 'Write-only. The server never sends it back to this page.')),
+    el('div', { class: 'field-hint' }, "If you already run Home Assistant's own WLED integration, that's the fuller remote — this is for setups without it."),
+  );
+  const host = $('#mqtt-host'), user = $('#mqtt-user'), pass = $('#mqtt-pass');
+  host.addEventListener('change', () => set('mqtt.host', host.value.trim(), true));
+  user.addEventListener('change', () => set('mqtt.username', user.value.trim(), true));
+  if (pwEdit) pass.addEventListener('change', () => { set('mqtt.password', pass.value, true); pwEdit = false; renderPage(); });
+  testMqttInline(host.value);
+}
+async function testMqttInline(hostval) {
+  const row = $('#mqtt-test-row');
+  if (!row || !hostval) { if (row) row.textContent = ''; return; }
+  row.textContent = 'Checking…';
+  const [host, portStr] = String(hostval).split(':');
   try {
-    const r = await fetch('/api/wled/segments?' + qs, { method: 'POST' });
-    const d = await r.json();
-    if (!r.ok) { toast('Failed: ' + JSON.stringify(d.results || d.errors), true); return; }
-    const saved = d.results.some((x) => x.preset && x.preset.ok);
-    toast(`Pushed ${d.segments.length} segment(s)` + (saved ? ', saved as preset 2' : ''));
-  } catch (err) {
-    toast('Failed: ' + err.message, true);
-  }
+    const r = await fetch('/api/mqtt/test', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ host, port: parseInt(portStr || '1883', 10), username: cfg.mqtt.username, password: '********' }),
+    });
+    const data = await r.json();
+    row.textContent = data.ok ? 'Reachable' : data.reason === 'auth' ? 'Broker refused that login' : "Can't reach that broker";
+    row.style.color = data.ok ? '' : 'var(--err)';
+  } catch (err) { row.textContent = ''; }
 }
 
-$('#push-frontback').addEventListener('click', () => pushLayout('front_to_back',
-  'Replace the controller\'s segments with ONE mirrored segment, offset to the front centre?' +
-  '\n\nA single effect then curls from the front centre down both sides to the rear. ' +
-  'You lose per-run effects. The Ambilight stream is unaffected.'));
+/* -- Config / system -- */
 
-$('#push-segments').addEventListener('click', async () => {
-  const names = cfg.mapping.edges.map((e) => e.name).join(', ');
-  await pushLayout('edges',
-    `Replace the controller's segments with one per edge (${names})?` +
-    `\n\nEach run then has its own effect. The Ambilight stream is unaffected.`);
-});
-
-$('#export').addEventListener('click', () => {
-  const blob = new Blob([JSON.stringify(cfg, null, 2)], { type: 'application/json' });
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = 'ambiwled-config.json';
-  a.click();
-  URL.revokeObjectURL(a.href);
-});
-
-$('#import').addEventListener('click', () => $('#import-file').click());
-$('#import-file').addEventListener('change', async (ev) => {
+function pageConfig(body) {
+  body.append(el('div', { class: 'page' },
+    el('div', { style: 'display:flex;flex-direction:column;gap:10px' },
+      el('a', { class: 'pill-btn block', href: '/api/config?download=1', download: 'ambiwled-config.json', style: 'text-decoration:none;display:block' }, 'Export settings as JSON'),
+      el('button', { class: 'pill-btn block', onclick: () => confirmImport() }, 'Import settings…'),
+      el('button', { class: 'pill-btn block', onclick: () => startWizard() }, 'Run setup again')),
+    el('div', {}, el('div', { class: 'section-title' }, 'Diagnostics'), el('div', { class: 'diag-box', id: 'diag-box' }, diagText())),
+    el('div', { class: 'danger-box' },
+      el('div', { class: 'title' }, 'Reset to defaults'),
+      el('div', { style: 'font-size:13px;opacity:.7;line-height:1.5' }, "Wipes the TV pairing, the mapping and every setting. You'd run setup again from scratch."),
+      el('button', { class: 'cta-btn danger', onclick: () => confirmReset() }, 'Reset AmbiWled')),
+  ));
+}
+function confirmReset() {
+  confirmAction('Reset to defaults?', "The TV pairing, the mapping and every setting go back to factory. You'd run setup again.", 'Reset', true, async () => {
+    const r = await fetch('/api/config/reset', { method: 'POST' });
+    const data = await r.json();
+    cfg = data.config;
+    renderAll();
+    toast('Reset to defaults');
+  });
+}
+function confirmImport() {
+  confirmAction('Import settings?', 'This replaces the whole config with the one in the file. It cannot be undone.', 'Choose file', true, () => {
+    $('#import-file').click();
+  });
+}
+async function onImportFile(ev) {
   const file = ev.target.files[0];
+  ev.target.value = '';
   if (!file) return;
   try {
-    cfg = JSON.parse(await file.text());
-    pushConfig(cfg, true);   // import is deliberately whole-config
-    await loadConfig();
-    toast('Config imported');
+    const text = await file.text();
+    const body = JSON.parse(text);
+    const r = await fetch('/api/config/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const data = await r.json();
+    if (!r.ok) { toast((data.errors || ['import failed'])[0], true); return; }
+    cfg = data.config;
+    renderAll();
+    toast('Imported');
   } catch (err) {
-    toast('Import failed: ' + err.message, true);
+    toast('Could not read that file: ' + err.message, true);
   }
-  ev.target.value = '';
-});
+}
 
-$('#reset').addEventListener('click', async () => {
-  if (!confirm('Reset all settings to defaults?')) return;
-  const r = await fetch('/api/config/reset', { method: 'POST' });
-  cfg = (await r.json()).config;
-  renderAll();
-  toast('Reset to defaults');
-});
+/* ---------- location (Use my location / paste coordinates) ---------- */
 
-/* Browser geolocation needs a secure context: over plain http on a LAN address
-   the API is simply absent, so say why rather than letting the button fail
-   mysteriously. Opening the UI over localhost or https makes it available. */
 function locationAvailable() {
-  return !!(navigator.geolocation && (window.isSecureContext ||
-            ['localhost', '127.0.0.1'].includes(location.hostname)));
+  return !!(navigator.geolocation && (window.isSecureContext
+    || ['localhost', '127.0.0.1'].includes(location.hostname)));
 }
-
-function refreshLocationNote() {
-  const note = $('#location-note');
-  const btn = $('#use-location');
-  if (!note || !btn) return;
-  const lat = cfg && cfg.dimming ? cfg.dimming.latitude : null;
-  const lon = cfg && cfg.dimming ? cfg.dimming.longitude : null;
-  const set = lat != null && (lat !== 0 || lon !== 0);
-  // Always show what is actually applied right now, persistently - not just a
-  // toast that can be missed. This is the thing to check if a change seems
-  // not to have taken.
-  const current = set ? `<b>Current location: ${lat}, ${lon}.</b> ` : '<b>No location set yet.</b> ';
-
-  // The button stays clickable either way, so clicking it is never silent -
-  // when geolocation is unavailable it explains why instead of doing nothing.
-  btn.disabled = false;
-  if (locationAvailable()) {
-    note.innerHTML = current + (set
-      ? 'Press the button, or paste new coordinates below, to change it.'
-      : 'Press the button, or paste coordinates from any map app below. Only latitude matters '
-        + 'much &mdash; a degree of longitude is four minutes of sunset.');
-  } else {
-    note.innerHTML = current +
-      'Paste coordinates from any map app below &mdash; long-press a spot and it shows something ' +
-      'like <code>60.4518, 22.2666</code>; a shared map link works too. ' +
-      '<i>Use my location</i> needs https or localhost, a browser rule this page cannot get around ' +
-      'on a plain LAN address; click it to see that explained.';
-  }
+function applyLocation(lat, lon, how) {
+  lat = Math.round(lat * 10000) / 10000;
+  lon = Math.round(lon * 10000) / 10000;
+  set('dimming.latitude', lat);
+  set('dimming.longitude', lon, true);
+  const input = $('#loc-input');
+  if (input) input.value = `${lat}, ${lon}`;
+  toast(`Location set to ${lat}, ${lon}${how ? ' (' + how + ')' : ''}`);
+  fetch('/api/state').then((r) => r.json()).then((d) => { metrics = Object.assign({}, metrics, d.metrics); updateMasterNote(); drawDimChart(); }).catch(() => {});
 }
-
-/* Accepts anything a phone or desktop map app puts on the clipboard:
-   "60.45, 22.27", "60.45N 22.27E", or a maps URL with @lat,lon / ?q=lat,lon /
-   !3dlat!4dlon. Typing two numbers by hand works too. Offline, no geocoding
-   service, no account, works wherever the page is served from. */
+function looksLikeUrl(text) { return /^https?:\/\//i.test(String(text).trim()); }
 function parseCoordinates(text) {
   if (!text) return null;
   const s = decodeURIComponent(String(text)).replace(/\s+/g, ' ').trim();
-
-  // Order matters: a Google link carries both the pin (!3d!4d) and the map
-  // centre (@lat,lon), and the pin is the one the user actually chose.
   const patterns = [
-    /!3d(-?\d{1,3}(?:\.\d+)?)!4d(-?\d{1,3}(?:\.\d+)?)/,        // google place pin
-    /#map=\d+\/(-?\d{1,3}(?:\.\d+)?)\/(-?\d{1,3}(?:\.\d+)?)/, // openstreetmap
-    /[?&]m?lat=(-?\d{1,3}(?:\.\d+)?)[^0-9-]+m?lon=(-?\d{1,3}(?:\.\d+)?)/, // osm share
-    /[?&]q=(-?\d{1,3}(?:\.\d+)?),\s*(-?\d{1,3}(?:\.\d+)?)/,    // ?q=lat,lon
-    /[@](-?\d{1,3}(?:\.\d+)?),\s*(-?\d{1,3}(?:\.\d+)?)/,       // maps @lat,lon
-    /(-?\d{1,3}(?:\.\d+)?)\s*[,;\s]\s*(-?\d{1,3}(?:\.\d+)?)/,  // plain pair
+    /!3d(-?\d{1,3}(?:\.\d+)?)!4d(-?\d{1,3}(?:\.\d+)?)/,
+    /#map=\d+\/(-?\d{1,3}(?:\.\d+)?)\/(-?\d{1,3}(?:\.\d+)?)/,
+    /[?&]m?lat=(-?\d{1,3}(?:\.\d+)?)[^0-9-]+m?lon=(-?\d{1,3}(?:\.\d+)?)/,
+    /[?&]q=(-?\d{1,3}(?:\.\d+)?),\s*(-?\d{1,3}(?:\.\d+)?)/,
+    /[@](-?\d{1,3}(?:\.\d+)?),\s*(-?\d{1,3}(?:\.\d+)?)/,
+    /(-?\d{1,3}(?:\.\d+)?)\s*[,;\s]\s*(-?\d{1,3}(?:\.\d+)?)/,
   ];
   for (const re of patterns) {
     const m = s.match(re);
@@ -888,8 +959,6 @@ function parseCoordinates(text) {
       if (Math.abs(lat) <= 90 && Math.abs(lon) <= 180) return { lat, lon };
     }
   }
-
-  // Hemisphere letters: "60.45 N, 22.27 E" (either order).
   const hemi = s.match(/(-?\d{1,3}(?:\.\d+)?)\s*([NSns])[ ,;]*(-?\d{1,3}(?:\.\d+)?)\s*([EWew])/);
   if (hemi) {
     const lat = parseFloat(hemi[1]) * (hemi[2].toUpperCase() === 'S' ? -1 : 1);
@@ -898,161 +967,65 @@ function parseCoordinates(text) {
   }
   return null;
 }
-
-function applyLocation(lat, lon, how) {
-  lat = Math.round(lat * 10000) / 10000;
-  lon = Math.round(lon * 10000) / 10000;
-  cfg.dimming.latitude = lat;
-  cfg.dimming.longitude = lon;
-  fillFields();
-  refreshLocationNote();               // shows "Current location: ..." right away
-
-  const latField = document.querySelector('[data-path="dimming.latitude"]');
-  const lonField = document.querySelector('[data-path="dimming.longitude"]');
-  if (latField) pendingFields.add(latField);
-  if (lonField) pendingFields.add(lonField);
-  pushConfig({ dimming: { latitude: lat, longitude: lon } }, true);
-  toast(`Location set to ${lat}, ${lon}${how ? ' (' + how + ')' : ''}`);
-
-  // The Sunrise/Sunset readout comes from the server's metrics, which
-  // otherwise only refreshes on the next periodic websocket tick - fetch it
-  // once right now so the effect is visible immediately, not "eventually".
-  fetch('/api/state').then((r) => r.json()).then((d) => applyMetrics(d.metrics)).catch(() => {});
-}
-
-function looksLikeUrl(text) {
-  return /^https?:\/\//i.test(String(text).trim());
-}
-
-function showApplied(box, lat, lon) {
-  box.value = `${lat}, ${lon} — applied`;
-  box.classList.add('saved');
-  setTimeout(() => { box.value = ''; box.classList.remove('saved'); }, 1600);
-}
-
-// A shortened map link (Google's maps.app.goo.gl Share default on mobile)
-// carries no coordinates itself - only the page it redirects to does, and a
-// browser will not let JS read where a cross-origin redirect like that
-// lands. The server can, without that restriction; this asks it to, then
-// runs the SAME parser on wherever it landed - one parser, one source of
-// truth for URL formats, regardless of whether a link needed resolving.
 async function resolveLinkAndApply(box, text) {
-  const original = box.value;
   box.disabled = true;
+  const original = box.value;
   box.value = 'Resolving link…';
   try {
-    const r = await fetch('/api/resolve-link', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url: text.trim() }),
-    });
+    const r = await fetch('/api/resolve-link', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url: text.trim() }) });
     const data = await r.json();
     if (!r.ok || !data.resolved_url) throw new Error(data.error || 'could not resolve the link');
     const hit = parseCoordinates(data.resolved_url);
     if (!hit) throw new Error('resolved, but no coordinates were in it');
     applyLocation(hit.lat, hit.lon, 'pasted, resolved');
-    showApplied(box, hit.lat, hit.lon);
   } catch (err) {
     toast('Could not resolve that link: ' + err.message, true);
     box.value = original;
   } finally {
     box.disabled = false;
-    box.focus();                       // disabling it mid-resolve drops focus; put it back
   }
 }
-
-$('#paste-location').addEventListener('input', (ev) => {
-  const hit = parseCoordinates(ev.target.value);
-  const note = $('#location-note');
-  const text = ev.target.value;
-  if (!text.trim()) { refreshLocationNote(); return; }
-  if (hit) {
-    note.innerHTML = `Reads as <b>${hit.lat}, ${hit.lon}</b> — press OK to use it.`;
-  } else if (looksLikeUrl(text)) {
-    note.innerHTML = 'Looks like a link — press OK to resolve it and read the coordinates.';
-  } else {
-    note.textContent = 'Not recognised yet. Paste a map link, or type "60.45, 22.27".';
-  }
-});
-
-// One shared action for the OK button and the Enter/Go key on a phone
-// keyboard - neither is more "correct" than the other, and a mobile keyboard
-// may not even have a literal Enter key, so the button is the one path that
-// works everywhere regardless of what a given keyboard calls its action key.
 function submitLocationText(box) {
   const text = box.value;
   const hit = parseCoordinates(text);
-  if (hit) {
-    applyLocation(hit.lat, hit.lon, 'pasted');
-    // Show what was actually read, in place, before clearing - proof it
-    // worked right where you typed, not just a toast that can be missed.
-    showApplied(box, hit.lat, hit.lon);
-    return;
-  }
-  if (looksLikeUrl(text)) {
-    resolveLinkAndApply(box, text);
-    return;
-  }
+  if (hit) { applyLocation(hit.lat, hit.lon, 'pasted'); return; }
+  if (looksLikeUrl(text)) { resolveLinkAndApply(box, text); return; }
   toast('Could not find coordinates in that', true);
 }
-
-$('#paste-location').addEventListener('keydown', (ev) => {
-  // Enter, or a mobile keyboard's action key however it reports itself.
-  if (ev.key !== 'Enter' && ev.key !== 'Go' && ev.keyCode !== 13) return;
-  ev.preventDefault();                 // never let it move focus or do anything else
-  submitLocationText(ev.target);
-});
-
-$('#apply-location').addEventListener('click', () => {
-  submitLocationText($('#paste-location'));
-});
-
-$('#use-location').addEventListener('click', () => {
-  const btn = $('#use-location');
-  // Always clickable, so clicking it is never silent: when geolocation is not
-  // available here it says so instead of doing nothing.
+function useMyLocation(btn) {
   if (!locationAvailable()) {
-    toast('Browser location needs https or localhost on this page — paste coordinates below instead', true);
+    toast('Browser location needs https or localhost on this page — paste coordinates instead', true);
     return;
   }
-  btn.disabled = true;
-  btn.textContent = 'Locating…';
+  btn.disabled = true; btn.textContent = 'Locating…';
   navigator.geolocation.getCurrentPosition(
     (pos) => {
-      const lat = Math.round(pos.coords.latitude * 10000) / 10000;
-      const lon = Math.round(pos.coords.longitude * 10000) / 10000;
-      applyLocation(lat, lon, `±${Math.round(pos.coords.accuracy)} m`);
-      btn.textContent = 'Use my location';
-      btn.disabled = false;
+      applyLocation(pos.coords.latitude, pos.coords.longitude, `±${Math.round(pos.coords.accuracy)} m`);
+      btn.disabled = false; btn.textContent = 'Use my location';
     },
     (err) => {
-      const why = err.code === 1 ? 'permission denied'
-        : err.code === 2 ? 'position unavailable' : 'timed out';
+      const why = err.code === 1 ? 'permission denied' : err.code === 2 ? 'position unavailable' : 'timed out';
       toast('Could not get location: ' + why, true);
-      btn.textContent = 'Use my location';
-      btn.disabled = false;
+      btn.disabled = false; btn.textContent = 'Use my location';
     },
-    { enableHighAccuracy: false, timeout: 10000, maximumAge: 600000 });
-});
+    { enableHighAccuracy: false, timeout: 10000, maximumAge: 600000 },
+  );
+}
 
-refreshLocationNote();
-
-/* ---------- auto-dim 24h forecast chart ----------
-   A line-for-line port of ambiwled/daylight.py's sunrise equation and dome
-   curve, so the graph matches the server exactly rather than approximating
-   it - and so it can redraw instantly as a slider moves, with no round trip.
-   Verified against the Python implementation for known dates/locations. */
+/* ---------- auto-dim 24h chart: a line-for-line port of daylight.py ---------- */
 
 const ZENITH = (-0.833) * Math.PI / 180;
 const OBLIQUITY = 23.4397 * Math.PI / 180;
 const J2000 = 2451545.0;
 const DAY_MS = 86400000;
-
+function rad(d) { return d * Math.PI / 180; }
+function deg(r) { return r * 180 / Math.PI; }
+function fromJulian(j) { return (j - 2440587.5) * DAY_MS; }
 function sunTimesRaw(lat, lon, dayUtcMidnightMs) {
   const n = (dayUtcMidnightMs - Date.UTC(2000, 0, 1)) / DAY_MS + 0.0008;
   const jStar = n - lon / 360.0;
   const m = rad(((357.5291 + 0.98560028 * jStar) % 360 + 360) % 360);
-  const c = 1.9148 * Math.sin(m) + 0.0200 * Math.sin(2 * m) + 0.0003 * Math.sin(3 * m);
+  const c = 1.9148 * Math.sin(m) + 0.02 * Math.sin(2 * m) + 0.0003 * Math.sin(3 * m);
   const lam = rad(((deg(m) + c + 180.0 + 102.9372) % 360 + 360) % 360);
   const jTransit = J2000 + jStar + 0.0053 * Math.sin(m) - 0.0069 * Math.sin(2 * lam);
   const declination = Math.asin(Math.sin(lam) * Math.sin(OBLIQUITY));
@@ -1063,160 +1036,305 @@ function sunTimesRaw(lat, lon, dayUtcMidnightMs) {
   if (cosOmega >= 1.0) return { polar: 'polar_night' };
   if (cosOmega <= -1.0) return { polar: 'polar_day' };
   const omega = deg(Math.acos(cosOmega));
-  return {
-    sunrise: fromJulian(jTransit - omega / 360.0),
-    sunset: fromJulian(jTransit + omega / 360.0),
-  };
+  return { sunrise: fromJulian(jTransit - omega / 360.0), sunset: fromJulian(jTransit + omega / 360.0) };
 }
-function rad(d) { return d * Math.PI / 180; }
-function deg(r) { return r * 180 / Math.PI; }
-function fromJulian(j) { return (j - 2440587.5) * DAY_MS; }
-
-const _sunTimesCache = new Map();
+const _sunCache = new Map();
 function sunTimesForDay(lat, lon, ms) {
-  const dayStart = Date.UTC(new Date(ms).getUTCFullYear(), new Date(ms).getUTCMonth(), new Date(ms).getUTCDate());
+  const d = new Date(ms);
+  const dayStart = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
   const key = lat + ',' + lon + ',' + dayStart;
-  if (!_sunTimesCache.has(key)) {
-    if (_sunTimesCache.size > 60) _sunTimesCache.clear();   // cheap unbounded-growth guard
-    _sunTimesCache.set(key, sunTimesRaw(lat, lon, dayStart));
+  if (!_sunCache.has(key)) {
+    if (_sunCache.size > 60) _sunCache.clear();
+    _sunCache.set(key, sunTimesRaw(lat, lon, dayStart));
   }
-  return _sunTimesCache.get(key);
+  return _sunCache.get(key);
 }
-
-function domeShape(s, exponent) {
-  s = Math.min(Math.max(s, 0), 1);
-  const base = 4.0 * s * (1.0 - s);
-  return exponent === 1.0 ? base : Math.pow(base, exponent);
-}
-
-/* Mirrors DimmingSchedule.day_fraction() / level() exactly. */
+function domeShape(s) { s = clamp(s, 0, 1); return 4.0 * s * (1.0 - s); }
 function dimmingLevelAt(ms, dim) {
+  if (!dim.enabled) return dim.day_level;
   const times = sunTimesForDay(dim.latitude, dim.longitude, ms);
   let frac;
-  if (times.polar) {
-    frac = times.polar === 'polar_night' ? 0.0 : 1.0;
-  } else {
-    const sunrise = times.sunrise + dim.sunrise_offset_minutes * 60000;
-    const sunset = times.sunset + dim.sunset_offset_minutes * 60000;
-    const span = sunset - sunrise;
-    frac = (span <= 0 || ms < sunrise || ms > sunset) ? 0.0
-      : domeShape((ms - sunrise) / span, dim.curve_exponent);
+  if (times.polar) frac = times.polar === 'polar_night' ? 0.0 : 1.0;
+  else {
+    const span = times.sunset - times.sunrise;
+    frac = (span <= 0 || ms < times.sunrise || ms > times.sunset) ? 0.0 : domeShape((ms - times.sunrise) / span);
   }
   return dim.night_level + (dim.day_level - dim.night_level) * frac;
 }
 
-/* Mirrors ColourStage.effective_brightness exactly. */
-function appliedFraction(level, col) {
-  const product = (col.brightness == null ? 1 : col.brightness) * level;
-  if (col.perceptual_brightness === false || product > 1.0) return product;
-  return Math.pow(Math.max(product, 0), col.perceptual_gamma || 2.2);
-}
-
-function drawCurve(ctx, values, x0, y0, plotW, plotH, colour, dash, fill) {
-  ctx.save();
-  ctx.beginPath();
-  values.forEach((v, i) => {
-    const x = x0 + plotW * (i / (values.length - 1));
-    const y = y0 + plotH * (1 - Math.min(Math.max(v, 0), 1));
-    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
-  });
-  if (fill) {
-    ctx.lineTo(x0 + plotW, y0 + plotH);
-    ctx.lineTo(x0, y0 + plotH);
-    ctx.closePath();
-    ctx.fillStyle = colour + '26';   // ~15% alpha fill under the primary curve
-    ctx.fill();
-    ctx.beginPath();
-    values.forEach((v, i) => {
-      const x = x0 + plotW * (i / (values.length - 1));
-      const y = y0 + plotH * (1 - Math.min(Math.max(v, 0), 1));
-      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
-    });
-  }
-  ctx.setLineDash(dash || []);
-  ctx.strokeStyle = colour;
-  ctx.lineWidth = fill ? 2 : 1.5;
-  ctx.stroke();
-  ctx.restore();
-}
-
-function drawDimmingChart() {
-  const cv = $('#dimming-chart');
-  if (!cv || !cfg) return;
-  const w = cv.clientWidth || 640, h = 170;
-  const ctx = sizeCanvas(cv, w, h);
-  const pad = { l: 36, r: 8, t: 10, b: 20 };
-  const x0 = pad.l, y0 = pad.t, plotW = w - pad.l - pad.r, plotH = h - pad.t - pad.b;
-
-  ctx.clearRect(0, 0, w, h);
-  ctx.fillStyle = '#0b0d10';
-  ctx.fillRect(x0, y0, plotW, plotH);
-
-  const dim = cfg.dimming, col = cfg.colour;
+function drawDimChart() {
+  const wrap = $('#curve-wrap');
+  if (!wrap) return;
   const now = Date.now();
-  const POINTS = 145;                        // one every ~10 minutes across 24h
-  const stepMs = (24 * 3600000) / (POINTS - 1);
-  const levels = [], applied = [];
-  for (let i = 0; i < POINTS; i++) {
-    const t = now + i * stepMs;
-    const lvl = dim.enabled === false ? 1.0 : dimmingLevelAt(t, dim);
-    levels.push(lvl);
-    applied.push(appliedFraction(lvl, col));
+  const dim = cfg.dimming;
+  const W = 320, H = 104;
+  const pts = [];
+  for (let i = 0; i <= 96; i++) {
+    const t = now + i * 15 * 60000;
+    const level = dimmingLevelAt(t, dim);
+    const x = (i / 96) * W;
+    const y = H - level * (H - 8);
+    pts.push([x, y]);
   }
+  const path = 'M' + pts.map((p) => p[0].toFixed(1) + ',' + p[1].toFixed(1)).join('L');
+  const area = path + `L${W},${H}L0,${H}Z`;
+  const dayY = (H - dim.day_level * (H - 8)).toFixed(1);
+  const nightY = (H - dim.night_level * (H - 8)).toFixed(1);
+  const nowLevel = dimmingLevelAt(now, dim);
+  const nowY = (H - nowLevel * (H - 8)).toFixed(1);
 
-  // gridlines + y labels
-  ctx.strokeStyle = '#20242c'; ctx.lineWidth = 1;
-  ctx.font = '10px ui-sans-serif, system-ui, sans-serif';
-  ctx.fillStyle = '#5c6472'; ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
-  [0, 25, 50, 75, 100].forEach((pct) => {
-    const y = y0 + plotH * (1 - pct / 100);
-    ctx.beginPath(); ctx.moveTo(x0, y); ctx.lineTo(x0 + plotW, y); ctx.stroke();
-    ctx.fillText(pct + '%', x0 - 5, y);
-  });
+  const svgns = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(svgns, 'svg');
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  svg.setAttribute('style', 'display:block;width:100%;height:auto;overflow:visible');
+  const defs = document.createElementNS(svgns, 'defs');
+  const grad = document.createElementNS(svgns, 'linearGradient');
+  grad.setAttribute('id', 'dimFill'); grad.setAttribute('x1', '0'); grad.setAttribute('y1', '0'); grad.setAttribute('x2', '0'); grad.setAttribute('y2', '1');
+  const s1 = document.createElementNS(svgns, 'stop'); s1.setAttribute('offset', '0'); s1.setAttribute('stop-color', 'var(--color-accent)'); s1.setAttribute('stop-opacity', '0.34');
+  const s2 = document.createElementNS(svgns, 'stop'); s2.setAttribute('offset', '1'); s2.setAttribute('stop-color', 'var(--color-accent)'); s2.setAttribute('stop-opacity', '0.02');
+  grad.append(s1, s2); defs.append(grad); svg.append(defs);
+  const mkLine = (y, colour) => { const l = document.createElementNS(svgns, 'line'); l.setAttribute('x1', '0'); l.setAttribute('y1', y); l.setAttribute('x2', W); l.setAttribute('y2', y); l.setAttribute('stroke', colour); l.setAttribute('stroke-opacity', '0.45'); l.setAttribute('stroke-dasharray', '2 5'); return l; };
+  svg.append(mkLine(dayY, 'var(--color-accent)'), mkLine(nightY, 'var(--color-accent-2)'));
+  const areaPath = document.createElementNS(svgns, 'path'); areaPath.setAttribute('d', area); areaPath.setAttribute('fill', 'url(#dimFill)');
+  const linePath = document.createElementNS(svgns, 'path'); linePath.setAttribute('d', path); linePath.setAttribute('fill', 'none'); linePath.setAttribute('stroke', 'var(--color-accent)'); linePath.setAttribute('stroke-width', '2.5'); linePath.setAttribute('stroke-linejoin', 'round'); linePath.setAttribute('stroke-linecap', 'round');
+  svg.append(areaPath, linePath);
+  const dot = document.createElementNS(svgns, 'circle'); dot.setAttribute('cx', '0'); dot.setAttribute('cy', nowY); dot.setAttribute('r', '3.6'); dot.setAttribute('fill', 'var(--color-accent)');
+  svg.append(dot);
 
-  // sunrise/sunset markers within the visible window
-  ctx.textAlign = 'center'; ctx.textBaseline = 'top';
-  const seenDays = new Set();
-  for (let i = 0; i < POINTS; i++) {
-    const t = now + i * stepMs;
-    const dayKey = new Date(t).toISOString().slice(0, 10);
-    if (seenDays.has(dayKey)) continue;
-    seenDays.add(dayKey);
-    const times = sunTimesForDay(dim.latitude, dim.longitude, t);
-    if (times.polar) continue;
-    for (const [label, at] of [['sunrise', times.sunrise], ['sunset', times.sunset]]) {
-      if (at < now || at > now + 24 * 3600000) continue;
-      const x = x0 + plotW * ((at - now) / (24 * 3600000));
-      ctx.strokeStyle = '#3a4150'; ctx.setLineDash([2, 3]);
-      ctx.beginPath(); ctx.moveTo(x, y0); ctx.lineTo(x, y0 + plotH); ctx.stroke();
-      ctx.setLineDash([]);
-      ctx.fillStyle = '#5c6472';
-      ctx.fillText(label === 'sunrise' ? '↑' : '↓', x, y0 + plotH + 2);
-    }
+  wrap.innerHTML = '';
+  wrap.append(svg);
+  const nowLabel = $('#curve-now');
+  if (nowLabel) nowLabel.textContent = 'now ' + Math.round(nowLevel * 100) + '%';
+
+  const ticks = el('div', { class: 'curve-ticks' });
+  for (let h = 0; h <= 24; h += 6) {
+    ticks.append(el('span', {}, new Date(now + h * 3600000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })));
   }
+  wrap.after(ticks);
 
-  drawCurve(ctx, levels, x0, y0, plotW, plotH, '#5c6472', [3, 3], false);
-  drawCurve(ctx, applied, x0, y0, plotW, plotH, '#4da3ff', [], true);
-
-  // "now" marker at the left edge, on the final-output curve
-  ctx.fillStyle = '#4da3ff';
-  ctx.beginPath();
-  ctx.arc(x0, y0 + plotH * (1 - Math.min(Math.max(applied[0], 0), 1)), 3, 0, Math.PI * 2);
-  ctx.fill();
-
-  // x-axis hour labels
-  ctx.fillStyle = '#5c6472'; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
-  [0, 6, 12, 18, 24].forEach((hrs) => {
-    const x = x0 + plotW * (hrs / 24);
-    const label = hrs === 0 ? 'now'
-      : new Date(now + hrs * 3600000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    ctx.fillText(label, x, y0 + plotH + 2);
-  });
+  updateMasterNote();
 }
 
-setInterval(drawDimmingChart, 60000);   // keep "now" accurate if the page is left open
+/* ================= WIZARD ================= */
 
-window.addEventListener('resize', () => { geomCache = null; drawCeiling(); drawStrip(); drawDimmingChart(); });
+const WIZ_STEPS = [
+  { k: 'Find your TV', t: 'Find your TV', s: 'Type the address of the television the lights should follow.' },
+  { k: 'Find your lights', t: 'Find your lights', s: 'This is the little box the LED strip plugs into.' },
+  { k: 'Your ceiling', t: 'Which sides have strip?', s: 'Tap every side that has LEDs. One is fine — most Ambilight builds use three.' },
+  { k: 'Count the LEDs', t: '', s: 'Not sure which side this is? Tap flash and watch which one lights up.' },
+  { k: 'Where you are', t: 'Where are you?', s: 'So the lights know when it gets dark outside.' },
+  { k: 'Home Assistant', t: 'Home Assistant', s: 'Optional. Most people skip this.' },
+  { k: "All done", t: "That's it — you're set.", s: 'Turn the TV on and the ceiling will follow it.' },
+];
 
-bindFields();
-loadConfig().then(connect).catch((e) => toast('Could not load config: ' + e.message, true));
+function startWizard() {
+  wiz = { step: 0, countIdx: 0, mqttTest: '', mqttErr: '' };
+  confirmState = null; renderConfirm();
+  $('#simple-view').hidden = true;
+  $('#advanced-view').hidden = true;
+  $('#wizard').hidden = false;
+  renderWizard();
+}
+function endWizard() {
+  wiz = null;
+  $('#wizard').hidden = true;
+  setAdvanced(advanced);
+}
+
+function renderWizard() {
+  const dots = $('#wiz-dots');
+  dots.innerHTML = '';
+  for (let i = 0; i < WIZ_STEPS.length; i++) dots.append(el('i', { class: i <= wiz.step ? 'done' : '' }));
+
+  const step = WIZ_STEPS[wiz.step];
+  const activeSlot = presentSlots()[Math.min(wiz.countIdx, presentSlots().length - 1)];
+  const title = wiz.step === 3 ? SLOT_QUESTION[activeSlot] : step.t;
+  const body = $('#wiz-body');
+  body.innerHTML = '';
+  body.append(
+    el('div', {},
+      el('div', { class: 'wiz-kicker' }, `${step.k} · ${wiz.step + 1} of ${WIZ_STEPS.length}`),
+      el('div', { class: 'wiz-title' }, title),
+      el('div', { class: 'wiz-sub' }, step.s)),
+  );
+
+  if (wiz.step === 0) body.append(wizFindTv());
+  else if (wiz.step === 1) body.append(wizFindLights());
+  else if (wiz.step === 2) body.append(wizSides());
+  else if (wiz.step === 3) body.append(wizCount(activeSlot));
+  else if (wiz.step === 4) {
+    body.append(wizPlace());
+    wireSlider($('#wiz-night-track'), $('#wiz-night-thumb'), $('#wiz-night-fill'), 30,
+      () => Math.round((cfg.dimming.night_level || 0) * 100),
+      (pct) => { const v = Math.min(pct, Math.round(cfg.dimming.day_level * 100) - 1) / 100; $('#wiz-night-label').textContent = Math.round(v * 100) + '%'; set('dimming.night_level', v); });
+  }
+  else if (wiz.step === 5) body.append(wizHa());
+  else if (wiz.step === 6) body.append(wizDone());
+
+  const dusk = $('#dusk-caption');
+  dusk.hidden = wiz.step !== 4;
+  dusk.textContent = 'Daytime brightness applies during the day; the night level after sunset.';
+  $('#wiz-svg').style.animation = wiz.step === 4 ? 'none' : 'none';
+
+  const skip = $('#wiz-skip');
+  skip.hidden = !(wiz.step === 5 && !cfg.mqtt.enabled);
+  const back = $('#wiz-back');
+  back.style.opacity = wiz.step === 0 ? '0.3' : '1';
+  const next = $('#wiz-next');
+  const footerHidden = wiz.step === 5 && cfg.mqtt.enabled && wiz.mqttTest === 'failed';
+  next.hidden = footerHidden;
+  next.textContent = wiz.step === WIZ_STEPS.length - 1 ? 'Take me to the lights'
+    : wiz.step === 3 && wiz.countIdx < presentSlots().length - 1 ? 'Next side'
+      : wiz.step === 5 && cfg.mqtt.enabled ? (wiz.mqttTest === 'testing' ? 'Testing…' : wiz.mqttTest === 'failed' ? 'Test again' : 'Test and continue')
+        : 'Next';
+
+  paintPreview('wz');
+}
+
+function wizFindTv() {
+  return el('div', { style: 'display:flex;flex-direction:column;gap:12px' },
+    el('div', { class: 'field' }, el('label', {}, 'TV address'),
+      el('input', { class: 'input', id: 'wiz-tv-ip', value: cfg.source.tv_ip, placeholder: '192.168.1.44',
+        onchange: (ev) => set('source.tv_ip', ev.target.value.trim(), true) })),
+    el('div', { class: 'field-hint' }, 'The IP address of the Philips TV on your network. Check its network settings if you\'re not sure.'));
+}
+function wizFindLights() {
+  const t = cfg.output.targets[0] || {};
+  return el('div', { style: 'display:flex;flex-direction:column;gap:12px' },
+    el('div', { class: 'field' }, el('label', {}, 'WLED controller address'),
+      el('input', { class: 'input', id: 'wiz-wled-host', value: t.host || '', placeholder: 'wled-ceiling.local',
+        onchange: (ev) => {
+          const targets = cfg.output.targets.slice();
+          if (!targets.length) targets.push({ port: 21324, http_port: 80, pixel_offset: 0, pixel_count: cfg.led.count, enabled: false });
+          targets[0] = Object.assign({}, targets[0], { host: ev.target.value.trim(), enabled: !!ev.target.value.trim(), pixel_count: cfg.led.count });
+          set('output.targets', targets, true);
+        } })),
+    el('div', { class: 'field-hint' }, 'The hostname or IP address WLED shows on its own network settings page.'));
+}
+function wizSides() {
+  const box = el('div', { class: 'two-col' });
+  for (const slot of SLOTS) {
+    const present = !!edgeBySlot(slot);
+    box.append(el('button', {
+      class: 'side-btn' + (present ? ' active' : ''),
+      onclick: () => { toggleSlot(slot); renderWizard(); },
+    }, el('span', { class: 'dot', style: present ? `background:${SLOT_COLOUR[slot]};box-shadow:0 0 9px ${SLOT_COLOUR[slot]}` : '' }),
+       el('span', { class: 'name' }, SLOT_LABEL[slot])));
+  }
+  return el('div', { style: 'display:flex;flex-direction:column;gap:10px' }, box,
+    el('div', { class: 'field-hint' }, presentSlots().length === 1 ? 'One run of strip. Everything else stays dark.'
+      : `${presentSlots().length} sides · ${presentSlots().map((s) => SLOT_LABEL[s]).join(' · ')}`));
+}
+function wizCount(slot) {
+  const e = edgeBySlot(slot);
+  const total = presentSlots().slice(0, wiz.countIdx + 1).reduce((n, s) => n + edgeBySlot(s).pixel_count, 0);
+  return el('div', { style: 'display:flex;flex-direction:column;gap:14px' },
+    el('div', { class: 'wiz-counter' },
+      el('button', { class: 'round-btn lg', onclick: () => { editEdge(slot, { pixel_count: Math.max(1, e.pixel_count - 1) }); renderWizard(); } }, '−'),
+      el('div', { class: 'value' }, el('b', {}, e.pixel_count), el('small', {}, 'LEDs on this side')),
+      el('button', { class: 'round-btn lg', onclick: () => { editEdge(slot, { pixel_count: e.pixel_count + 1 }); renderWizard(); } }, '+')),
+    el('div', { style: 'display:flex;gap:10px' },
+      el('button', { class: 'pill-btn soft', style: 'flex:1', onclick: () => flashSlot(slot) }, 'Flash this side'),
+      el('button', { class: 'pill-btn soft', style: 'flex:1', onclick: () => { editEdge(slot, { reversed: !e.reversed }); renderWizard(); } }, e.reversed ? 'Flip back' : 'Flip')),
+    el('div', { style: 'font-size:13px;opacity:.7;line-height:1.45' }, `Look at the real strip: it should be chasing ${(slot === 'left' || slot === 'right') ? 'back to front' : 'left to right'}, like the picture. If it runs the other way, tap Flip.`),
+    el('div', { style: 'font-size:12.5px;opacity:.55' }, `Side ${wiz.countIdx + 1} of ${presentSlots().length} · ${total} LEDs so far`));
+}
+function wizPlace() {
+  return el('div', { style: 'display:flex;flex-direction:column;gap:15px' },
+    el('button', { class: 'pill-btn soft', style: 'min-height:52px', onclick: (ev) => useMyLocation(ev.target) }, 'Use my location'),
+    el('div', { class: 'field' }, el('label', {}, 'Or paste coordinates / a map link'),
+      el('input', { class: 'input', id: 'wiz-loc', placeholder: '60.45, 22.27', value: locationText(),
+        onchange: (ev) => submitLocationText(ev.target) })),
+    el('div', {},
+      el('div', { class: 'row-label' }, el('span', { class: 'name' }, 'How dim at night'), el('span', { class: 'value' }, el('b', { id: 'wiz-night-label' }, Math.round(cfg.dimming.night_level * 100) + '%'))),
+      el('div', { class: 'slider', id: 'wiz-night-track' }, el('div', { class: 'fill-track' }, el('div', { class: 'fill', id: 'wiz-night-fill' })), el('div', { class: 'thumb', id: 'wiz-night-thumb' }))));
+}
+function wizHa() {
+  const on = !!cfg.mqtt.enabled;
+  const wrap = el('div', { style: 'display:flex;flex-direction:column;gap:12px' },
+    el('div', { class: 'toggle-row' }, el('span', { class: 'name' }, 'Show up in Home Assistant'),
+      el('button', { class: 'toggle-switch' + (on ? ' on' : ''), onclick: () => { set('mqtt.enabled', !on, true); wiz.mqttTest = ''; renderWizard(); } }, el('span', { class: 'knob' }))));
+  if (!on) { wrap.append(el('div', { class: 'field-hint' }, "Leave it off if you don't use Home Assistant. You can turn it on later.")); return wrap; }
+  if (wiz.mqttTest === 'testing') {
+    wrap.append(el('div', { class: 'spinner-row' }, el('span', { class: 'spinner' }), el('span', {}, `Logging in to ${cfg.mqtt.host}…`)));
+    return wrap;
+  }
+  if (wiz.mqttTest === 'failed') {
+    wrap.append(el('div', { class: 'fail-card' },
+      el('div', { class: 'head' }, el('b', {}, wiz.mqttErr === 'unreachable' ? "Can't reach that broker" : 'The broker refused that login')),
+      el('div', { style: 'font-size:14px;opacity:.8;line-height:1.5' }, wiz.mqttErr === 'unreachable'
+        ? `Nothing answered at ${cfg.mqtt.host}. Check the address and that the broker is running.`
+        : `Connected to ${cfg.mqtt.host}, but it rejected the username or password.`),
+      el('div', { style: 'display:flex;gap:10px' },
+        el('button', { class: 'cta-btn', style: 'flex:1', onclick: () => { wiz.mqttTest = ''; renderWizard(); } }, 'Fix the details'),
+        el('button', { class: 'pill-btn', style: 'flex:1', onclick: () => { set('mqtt.enabled', false, true); wiz.step = 6; renderWizard(); } }, 'Set up later'))));
+    return wrap;
+  }
+  wrap.append(
+    el('div', { class: 'field-hint' }, 'AmbiWled announces itself over your MQTT broker — the same one Home Assistant uses.'),
+    el('div', { class: 'field' }, el('label', {}, 'Broker address'),
+      el('input', { class: 'input', id: 'wiz-mqtt-host', value: cfg.mqtt.host, placeholder: '192.168.1.10:1883',
+        onchange: (ev) => set('mqtt.host', ev.target.value.trim(), true) })),
+    el('div', { class: 'field' }, el('label', {}, 'Username'),
+      el('input', { class: 'input', value: cfg.mqtt.username, placeholder: 'Leave blank if the broker is open',
+        onchange: (ev) => set('mqtt.username', ev.target.value.trim(), true) })),
+    el('div', { class: 'field' }, el('label', {}, 'Password'),
+      el('input', { class: 'input', type: 'password', id: 'wiz-mqtt-pass', placeholder: 'Leave blank if the broker is open' })),
+    el('div', { class: 'field-hint' }, "We'll try to log in before moving on, so you find out now rather than later."),
+  );
+  return wrap;
+}
+function wizDone() {
+  const total = presentSlots().reduce((n, s) => n + edgeBySlot(s).pixel_count, 0);
+  return el('div', { class: 'done-grid' },
+    el('div', { class: 'cell' }, el('div', { class: 'k' }, 'TV'), el('div', { class: 'v' }, cfg.source.tv_ip || '—')),
+    el('div', { class: 'cell' }, el('div', { class: 'k' }, 'Ceiling'), el('div', { class: 'v' }, `${total} LEDs`)));
+}
+
+function wireWizardFooter() {
+  $('#wiz-back').addEventListener('click', () => {
+    if (wiz.step === 3 && wiz.countIdx > 0) { wiz.countIdx -= 1; renderWizard(); return; }
+    wiz.step = Math.max(0, wiz.step - 1);
+    renderWizard();
+  });
+  $('#wiz-skip').addEventListener('click', () => wizNext());
+  $('#wiz-next').addEventListener('click', () => wizNext());
+}
+async function wizNext() {
+  if (wiz.step === 3 && wiz.countIdx < presentSlots().length - 1) { wiz.countIdx += 1; renderWizard(); return; }
+  if (wiz.step === 5 && cfg.mqtt.enabled) {
+    if (wiz.mqttTest === 'testing') return;
+    wiz.mqttTest = 'testing'; renderWizard();
+    const [host, portStr] = String(cfg.mqtt.host).split(':');
+    const passInput = $('#wiz-mqtt-pass');
+    const password = passInput ? passInput.value : '';
+    try {
+      const r = await fetch('/api/mqtt/test', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ host, port: parseInt(portStr || '1883', 10), username: cfg.mqtt.username, password }),
+      });
+      const data = await r.json();
+      if (data.ok) {
+        if (password) set('mqtt.password', password, true);
+        wiz.mqttTest = 'ok'; wiz.step = 6; renderWizard();
+      } else {
+        wiz.mqttTest = 'failed'; wiz.mqttErr = data.reason || 'unreachable'; renderWizard();
+      }
+    } catch (err) { wiz.mqttTest = 'failed'; wiz.mqttErr = 'unreachable'; renderWizard(); }
+    return;
+  }
+  if (wiz.step === WIZ_STEPS.length - 1) { endWizard(); return; }
+  wiz.step += 1; wiz.countIdx = 0; renderWizard();
+}
+
+/* ---------- full render ---------- */
+
+function renderAll() {
+  $('#simple-view').hidden = advanced;
+  $('#advanced-view').hidden = !advanced;
+  renderSimple();
+  if (advanced) { renderTabs(); renderPage(); }
+  renderPreviewFromPixels();
+}
+
+document.addEventListener('DOMContentLoaded', boot);
