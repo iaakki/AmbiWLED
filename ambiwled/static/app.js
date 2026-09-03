@@ -1337,6 +1337,12 @@ async function wizNext() {
     return;
   }
   if (wiz.step === WIZ_STEPS.length - 1) { endWizard(); return; }
+  // Arriving at "Where you are" is the one place the wizard asks for a
+  // location and a night level - so it is also the one place that should
+  // actually turn auto-dim on. Without this, finishing the wizard leaves
+  // both configured and silently inactive until someone finds the toggle
+  // in Advanced.
+  if (wiz.step === 3) set('dimming.enabled', true, true);
   wiz.step += 1; wiz.countIdx = 0; renderWizard();
 }
 
