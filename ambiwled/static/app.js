@@ -563,7 +563,8 @@ function pageDim(body) {
   dimBody.append(
     el('div', { class: 'curve-card' },
       el('div', { class: 'curve-head' }, el('span', { class: 'label' }, 'Next 24 hours'), el('span', { class: 'now', id: 'curve-now' })),
-      el('div', { class: 'curve-wrap', id: 'curve-wrap' })),
+      el('div', { class: 'curve-wrap', id: 'curve-wrap' }),
+      el('div', { class: 'curve-ticks', id: 'curve-ticks' })),
     el('div', {},
       el('div', { class: 'field-title' }, el('span', { class: 'name' }, 'Day level'), el('span', { class: 'value', id: 'day-label' })),
       el('div', { class: 'slider small', id: 'day-track' }, el('div', { class: 'fill-track' }, el('div', { class: 'fill', id: 'day-fill' })), el('div', { class: 'thumb', id: 'day-thumb' })),
@@ -1147,11 +1148,13 @@ function drawDimChart() {
   const nowLabel = $('#curve-now');
   if (nowLabel) nowLabel.textContent = 'now ' + Math.round(nowLevel * 100) + '%';
 
-  const ticks = el('div', { class: 'curve-ticks' });
-  for (let h = 0; h <= 24; h += 6) {
-    ticks.append(el('span', {}, new Date(now + h * 3600000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })));
+  const ticks = $('#curve-ticks');
+  if (ticks) {
+    ticks.innerHTML = '';
+    for (let h = 0; h <= 24; h += 6) {
+      ticks.append(el('span', {}, new Date(now + h * 3600000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })));
+    }
   }
-  wrap.after(ticks);
 
   updateMasterNote();
 }
