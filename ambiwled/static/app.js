@@ -394,7 +394,10 @@ function renderSimple() {
 
   const bright = Math.round((cfg.colour.brightness || 0) * 100);
   $('#bright-label').textContent = bright + '%';
-  const level = (metrics.dimming && metrics.dimming.level != null) ? metrics.dimming.level : 1.0;
+  // Computed here, not read from the last metrics push: the whole point is
+  // that this updates the instant brightness or auto-dim changes, not once
+  // the next periodic websocket tick happens to arrive.
+  const level = dimmingLevelAt(Date.now(), cfg.dimming);
   const eff = Math.round(level * bright);
   $('#bright-eff').textContent = cfg.dimming.enabled ? `→ ${eff}% out` : '';
   wireSlider($('#bright-slider'), $('#bright-thumb'), $('#bright-fill'), 34,
@@ -627,7 +630,7 @@ function locationText() {
 function updateMasterNote() {
   const n = $('#master-note');
   if (!n) return;
-  const level = (metrics.dimming && metrics.dimming.level != null) ? metrics.dimming.level : cfg.dimming.day_level;
+  const level = dimmingLevelAt(Date.now(), cfg.dimming);
   const bright = Math.round((cfg.colour.brightness || 1) * 100);
   const eff = Math.round(level * bright);
   n.textContent = cfg.dimming.enabled

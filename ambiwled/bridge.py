@@ -257,6 +257,13 @@ class Bridge:
         self.health.update(cfg)
         self.mqtt.update(cfg)
         self.poller.update(cfg)
+        # The output loop only re-samples the dimming schedule every 20s -
+        # fine for the sun moving, wrong for a config change. Night level,
+        # day level, and the enabled switch itself all take visible
+        # brightness with them; nothing about this change should wait up to
+        # 20s to reach the strip.
+        self.colour.auto_level = self.dimming.level()
+        self._dim_checked = time.monotonic()
         self._dirty = True
         self._rebuild()
 

@@ -128,6 +128,23 @@ async def test_identify_overrides_the_stream_then_releases_it(wired):
     assert bridge.last_frame[200].any() or bridge.poller.state != "streaming"
 
 
+# -- dimming: a config change must reach the strip immediately -------------
+
+def test_apply_config_updates_auto_level_immediately():
+    """The output loop only re-samples the dimming schedule every 20s - fine
+    for the sun moving, not for a config change. Disabling auto-dim (or
+    changing night/day level) must snap the real output straight away,
+    not leave it showing whatever the schedule said up to 20s ago."""
+    bridge = Bridge(config_mod.default_config())
+    bridge.colour.auto_level = 0.18  # simulate having settled on a dim night level
+
+    cfg = config_mod.default_config()
+    cfg["dimming"]["enabled"] = False   # disabled always means 1.0, no clock/location needed
+    bridge.apply_config(cfg)
+
+    assert bridge.colour.auto_level == 1.0
+
+
 # -- identify: a moving comet, so a flipped edge is visible on the real strip -
 
 def test_identify_by_name_lights_only_part_of_its_own_edge(monkeypatch):
