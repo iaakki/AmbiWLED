@@ -12,23 +12,8 @@ from ambiwled import config as config_mod
 from ambiwled.bridge import Bridge
 from ambiwled.server import Server
 
-
-@pytest.fixture
-async def running(tmp_config):
-    """A real Server on an ephemeral port.  The poller is never started, so no
-    TV is contacted; the output loop is not running either."""
-    cfg = config_mod.default_config()
-    cfg["web"] = {"host": "127.0.0.1", "port": 0, "preview_fps": 15.0}
-    config_mod.save(cfg)
-
-    bridge = Bridge(cfg)
-    server = Server(bridge)
-    runner = await server.start()
-    host, port = runner.addresses[0][:2]
-    base = f"http://{host}:{port}"
-    async with aiohttp.ClientSession() as session:
-        yield server, bridge, base, session, tmp_config
-    await server.stop(runner)
+# `running` (a real Server on an ephemeral port) lives in conftest.py now -
+# shared with tests/test_ui.py, which drives the same server with a browser.
 
 
 async def test_state_reports_config_and_validation(running):
