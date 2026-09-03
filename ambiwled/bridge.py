@@ -280,6 +280,15 @@ class Bridge:
         self.identify_colour = colour
         self.identify_until = time.monotonic() + seconds if (edge or span) else 0.0
 
+    # A moving comet, not a static fill: the whole point of identifying a
+    # named edge is checking that the direction it appears to run in on the
+    # real strip matches what `reversed` tells the rest of the pipeline -
+    # exactly the thing a solid colour cannot show. The span form (used
+    # while an edge is still being edited, before it has a name to look up)
+    # has no `reversed` of its own to check, so it stays a plain fill.
+    _CHASE_PERIOD_S = 1.6
+    _CHASE_WIDTH_PX = 4.0
+
     def _identify_frame(self) -> np.ndarray | None:
         active = self.identify_edge or self.identify_span
         if not active or time.monotonic() > self.identify_until:
@@ -298,10 +307,26 @@ class Bridge:
         for e in self.cfg["mapping"]["edges"]:
             if e.get("name") == self.identify_edge:
                 start = int(e["pixel_start"])
-                end = min(start + int(e["pixel_count"]), self.led_count)
-                frame[start:end] = self.identify_colour
+                n = min(int(e["pixel_count"]), self.led_count - start)
+                if n > 0:
+                    self._paint_chase(frame, start, n, bool(e.get("reversed")))
                 return frame
         return frame
+
+    def _paint_chase(self, frame: np.ndarray, start: int, n: int, reversed_: bool) -> None:
+        """A short comet sweeping the edge's own pixel order - ascending
+        unless `reversed`, so flipping that field visibly flips which way
+        the comet runs the next time Identify is pressed."""
+        t = (time.monotonic() % self._CHASE_PERIOD_S) / self._CHASE_PERIOD_S
+        if reversed_:
+            t = 1.0 - t
+        head = t * n
+        idx = np.arange(n, dtype=np.float32)
+        dist = np.abs(idx - head)
+        dist = np.minimum(dist, n - dist)  # wrap, so the tail doesn't clip at the loop point
+        intensity = np.clip(1.0 - dist / self._CHASE_WIDTH_PX, 0.0, 1.0) ** 1.5
+        colour = np.asarray(self.identify_colour, dtype=np.float32)
+        frame[start : start + n] = intensity[:, None] * colour
 
     # -- output loop -----------------------------------------------------
 

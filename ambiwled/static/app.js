@@ -250,11 +250,20 @@ function editEdge(slot, patch) {
   repack();
   pushEdges();
 }
+function hexToRgb(hex) {
+  const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex);
+  return m ? [parseInt(m[1], 16), parseInt(m[2], 16), parseInt(m[3], 16)] : [255, 255, 255];
+}
+/** Same colour on the real strip as this edge's dot in the app - a chase,
+    not a flat fill, so a flipped edge is visible: it runs the same
+    direction on the LEDs as the Flip button says it should. */
 function flashSlot(slot) {
   clearTimeout(window._flashTimer);
   flashEdge = slot;
   renderPreviewFromPixels();
-  if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'identify', edge: slot, seconds: 3 }));
+  if (ws && ws.readyState === 1) {
+    ws.send(JSON.stringify({ type: 'identify', edge: slot, seconds: 4.8, colour: hexToRgb(SLOT_COLOUR[slot]) }));
+  }
   window._flashTimer = setTimeout(() => { flashEdge = ''; renderPreviewFromPixels(); }, 900);
 }
 

@@ -19,7 +19,7 @@ def bridge_cfg(tv, sink_host, sink_port):
                           "request_timeout_s": 1.0})
     cfg["output"]["targets"] = [{"host": sink_host, "port": sink_port,
                                  "pixel_offset": 0, "pixel_count": 462, "enabled": True}]
-    cfg["frames"].update({"mode": "passthrough", "output_fps": 60.0})
+    cfg["frames"].update({"output_fps": 60.0})
     return cfg
 
 
@@ -126,6 +126,66 @@ async def test_identify_overrides_the_stream_then_releases_it(wired):
     assert bridge.identify_span is None
     await asyncio.sleep(0.2)
     assert bridge.last_frame[200].any() or bridge.poller.state != "streaming"
+
+
+# -- identify: a moving comet, so a flipped edge is visible on the real strip -
+
+def test_identify_by_name_lights_only_part_of_its_own_edge(monkeypatch):
+    """A comet, not a solid fill - and it must never spill past the edge's
+    own pixel range into whatever is next to it."""
+    import time as time_mod
+    bridge = Bridge(config_mod.default_config())
+    bridge.identify(edge="front", seconds=5.0)         # front: pixels 0..132
+    monkeypatch.setattr(time_mod, "monotonic", lambda: 1000.2)
+    frame = bridge._identify_frame()
+    lit = np.where(frame.any(axis=1))[0]
+    assert len(lit) > 0
+    assert lit.min() >= 0 and lit.max() < 133
+    assert len(lit) < 133
+
+
+def test_identify_chase_moves_over_time(monkeypatch):
+    import time as time_mod
+    bridge = Bridge(config_mod.default_config())
+    bridge.identify(edge="front", seconds=5.0)
+    monkeypatch.setattr(time_mod, "monotonic", lambda: 1000.0)
+    frame_a = bridge._identify_frame()
+    monkeypatch.setattr(time_mod, "monotonic", lambda: 1000.8)
+    frame_b = bridge._identify_frame()
+    assert not np.allclose(frame_a, frame_b)
+
+
+def test_identify_chase_direction_follows_reversed(monkeypatch):
+    """The whole point: flipping `reversed` must flip which way the comet
+    runs, so pressing Identify after tapping Flip is the confirmation."""
+    import time as time_mod
+
+    def make(is_reversed):
+        cfg = config_mod.default_config()
+        for e in cfg["mapping"]["edges"]:
+            if e["name"] == "front":
+                e["reversed"] = is_reversed
+        b = Bridge(cfg)
+        b.identify(edge="front", seconds=5.0)
+        return b
+
+    forward, backward = make(False), make(True)
+    monkeypatch.setattr(time_mod, "monotonic", lambda: 1000.1)  # early in the cycle
+    f_head = int(np.argmax(forward._identify_frame().sum(axis=1)))
+    b_head = int(np.argmax(backward._identify_frame().sum(axis=1)))
+    assert f_head < 133 // 2, "not reversed: early in the cycle, near the start"
+    assert b_head > 133 // 2, "reversed: early in the cycle, near the end"
+
+
+def test_identify_by_range_is_still_a_plain_fill():
+    """The span form (identifying an edge still being edited, before it has
+    a saved `reversed` to check) is unaffected - no direction to show yet."""
+    bridge = Bridge(config_mod.default_config())
+    bridge.identify(span=(10, 20), seconds=5.0)
+    frame = bridge._identify_frame()
+    block = frame[10:30]
+    assert block.min() > 0
+    assert block.min() == block.max()
 
 
 async def test_metrics_report_reality(wired):
