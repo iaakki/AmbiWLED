@@ -400,10 +400,12 @@ function renderLive() {
 
 function diagText() {
   const m = metrics;
+  const load = Array.isArray(m.load_avg) ? m.load_avg.map((v) => v.toFixed(2)).join(' ') : '–';
   return `ws   /ws        open · ${m.source_fps ?? 0} fps in · ${m.output_fps ?? 0} fps out\n`
     + `tv   ${cfg.source.tv_ip || '(not set)'} ${m.tv_state || '?'} · ${m.source_latency_ms ?? '–'} ms · ${m.failed_polls ?? 0} failed polls\n`
     + `wled ${(cfg.output.targets[0] || {}).host || '(not set)'} ${metrics.targets_online ? 'ok' : 'unreachable'}\n`
-    + `mqtt ${cfg.mqtt.enabled ? (metrics.mqtt && metrics.mqtt.connected ? 'connected' : 'connecting') : 'disabled'}`;
+    + `mqtt ${cfg.mqtt.enabled ? (metrics.mqtt && metrics.mqtt.connected ? 'connected' : 'connecting') : 'disabled'}\n`
+    + `cpu  ${m.cpu_percent ?? 0}% of 1 core · ${m.cpu_count ?? '?'} core${m.cpu_count === 1 ? '' : 's'} available · load ${load}`;
 }
 
 /* ================= SIMPLE VIEW ================= */

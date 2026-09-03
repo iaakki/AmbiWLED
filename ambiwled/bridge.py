@@ -4,6 +4,8 @@ from __future__ import annotations
 import asyncio
 import copy
 import logging
+import os
+import resource
 import time
 from collections import deque
 from typing import Any
@@ -53,6 +55,14 @@ class Bridge:
         self.edge_scale: np.ndarray | None = None
         self.output_fps_actual = 0.0
         self._dim_checked = 0.0
+        # A resampled percentage, not a lifetime average - CPU spikes (a
+        # scene cut driving adaptive alpha hard, an identify chase) show up
+        # within a couple of seconds instead of being smoothed away by
+        # everything that came before.
+        self.cpu_percent = 0.0
+        self._cpu_checked = 0.0
+        self._cpu_last_wall = time.monotonic()
+        self._cpu_last_proc = self._proc_cpu_seconds()
         self._emitting_since: float | None = None
         # Preset-mode arbiter: retries a selection until confirmed, so it
         # works whether the controller accepts it immediately or only once
@@ -348,6 +358,13 @@ class Bridge:
                 self._dim_checked = now
                 self.colour.auto_level = self.dimming.level()
 
+            if now - self._cpu_checked > 2.0:
+                proc_now = self._proc_cpu_seconds()
+                wall_dt = now - self._cpu_last_wall
+                if wall_dt > 0:
+                    self.cpu_percent = round(100.0 * (proc_now - self._cpu_last_proc) / wall_dt, 1)
+                self._cpu_last_wall, self._cpu_last_proc, self._cpu_checked = now, proc_now, now
+
             if (self._preset_target is not None and not self._preset_applied
                     and not self._preset_pending and now - self._preset_last_attempt > 2.0):
                 self._preset_last_attempt = now
@@ -416,7 +433,28 @@ class Bridge:
             "brightness_applied": round(self.colour.effective_brightness, 4),
             "dimming": self.dimming.describe(),
             "source_interval_ms": round(self.engine.source_interval * 1000.0, 1),
+            "cpu_percent": self.cpu_percent,
+            "cpu_count": self._cpu_count(),
+            # The host's load average, not a per-container figure - cgroups
+            # don't get their own; still the honest answer to "how busy is
+            # the machine this is running on".
+            "load_avg": os.getloadavg(),
         }
+
+    @staticmethod
+    def _proc_cpu_seconds() -> float:
+        r = resource.getrusage(resource.RUSAGE_SELF)
+        return r.ru_utime + r.ru_stime
+
+    @staticmethod
+    def _cpu_count() -> int:
+        # Reflects a cgroup CPU-set limit if one is applied to the
+        # container; os.cpu_count() would report the host's full count
+        # regardless, which is misleading for "how many cores do I have".
+        try:
+            return len(os.sched_getaffinity(0))
+        except AttributeError:
+            return os.cpu_count() or 1
 
     def preview(self) -> list[int]:
         return self.last_frame.reshape(-1).tolist()

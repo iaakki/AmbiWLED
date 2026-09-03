@@ -218,6 +218,36 @@ async def test_metrics_report_reality(wired):
     assert m["send_errors"] == 0
 
 
+# -- process/host resource diagnostics ---------------------------------------
+
+def test_cpu_count_reports_the_actual_affinity_not_just_the_host_total():
+    """A cgroup CPU-set limit, if any, is what "how many cores do I have"
+    should answer - os.cpu_count() ignores that and reports the host."""
+    assert Bridge._cpu_count() >= 1
+
+
+def test_proc_cpu_seconds_only_ever_goes_up():
+    a = Bridge._proc_cpu_seconds()
+    for _ in range(300000):
+        pass  # burn a little real CPU so utime has something to record
+    b = Bridge._proc_cpu_seconds()
+    assert b >= a
+
+
+async def test_metrics_report_cpu_and_load(wired):
+    """Resampled within the output loop, not a lifetime average - a real
+    spike should be visible within a couple of seconds, not smoothed away
+    by everything that ran before it."""
+    bridge, tv, recv = wired
+    await _wait_for(lambda: bridge.poller.state == "streaming")
+    await asyncio.sleep(2.3)  # past the 2s resample window
+
+    m = bridge.metrics()
+    assert m["cpu_percent"] >= 0.0
+    assert m["cpu_count"] >= 1
+    assert len(m["load_avg"]) == 3
+
+
 # -- per-edge brightness trim -------------------------------------------------
 
 def edges_for(brightness_by_name: dict[str, float]) -> list[dict]:
