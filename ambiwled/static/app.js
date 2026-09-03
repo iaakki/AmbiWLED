@@ -582,6 +582,20 @@ function pageDim(body) {
   drawDimChart();
 }
 
+/** The broker field shows/accepts "host:port" together; the schema keeps
+    them as separate fields, so this is the one place that splits it. */
+function mqttHostValue() { return cfg.mqtt.host ? `${cfg.mqtt.host}:${cfg.mqtt.port}` : ''; }
+function setMqttHostPort(text) {
+  const s = String(text).trim();
+  const i = s.lastIndexOf(':');
+  const port = i > 0 ? parseInt(s.slice(i + 1), 10) : NaN;
+  const host = i > 0 && !Number.isNaN(port) ? s.slice(0, i) : s;
+  cfg.mqtt.host = host;
+  const patch = { mqtt: { host } };
+  if (!Number.isNaN(port)) { cfg.mqtt.port = port; patch.mqtt.port = port; }
+  pushConfig(patch, true);
+}
+
 function locationText() {
   const lat = cfg.dimming.latitude, lon = cfg.dimming.longitude;
   if (!lat && !lon) return '';
@@ -845,7 +859,7 @@ function pageIntegrations(body) {
   const b = $('#mqtt-body');
   b.append(
     el('div', { class: 'field' }, el('label', {}, 'Broker address'),
-      el('input', { class: 'input', id: 'mqtt-host', value: cfg.mqtt.host, placeholder: '192.168.1.10:1883' }),
+      el('input', { class: 'input', id: 'mqtt-host', value: mqttHostValue(), placeholder: '192.168.1.10:1883' }),
       el('div', { class: 'field-hint', id: 'mqtt-test-row' })),
     el('div', { class: 'field' }, el('label', {}, 'Username'), el('input', { class: 'input', id: 'mqtt-user', value: cfg.mqtt.username })),
     el('div', { class: 'field' }, el('label', {}, 'Password'),
@@ -856,7 +870,7 @@ function pageIntegrations(body) {
     el('div', { class: 'field-hint' }, "If you already run Home Assistant's own WLED integration, that's the fuller remote — this is for setups without it."),
   );
   const host = $('#mqtt-host'), user = $('#mqtt-user'), pass = $('#mqtt-pass');
-  host.addEventListener('change', () => set('mqtt.host', host.value.trim(), true));
+  host.addEventListener('change', () => setMqttHostPort(host.value));
   user.addEventListener('change', () => set('mqtt.username', user.value.trim(), true));
   if (pwEdit) pass.addEventListener('change', () => { set('mqtt.password', pass.value, true); pwEdit = false; renderPage(); });
   testMqttInline(host.value);
@@ -1256,15 +1270,15 @@ function wizHa() {
       el('button', { class: 'toggle-switch' + (on ? ' on' : ''), onclick: () => { set('mqtt.enabled', !on, true); wiz.mqttTest = ''; renderWizard(); } }, el('span', { class: 'knob' }))));
   if (!on) { wrap.append(el('div', { class: 'field-hint' }, "Leave it off if you don't use Home Assistant. You can turn it on later.")); return wrap; }
   if (wiz.mqttTest === 'testing') {
-    wrap.append(el('div', { class: 'spinner-row' }, el('span', { class: 'spinner' }), el('span', {}, `Logging in to ${cfg.mqtt.host}…`)));
+    wrap.append(el('div', { class: 'spinner-row' }, el('span', { class: 'spinner' }), el('span', {}, `Logging in to ${mqttHostValue()}…`)));
     return wrap;
   }
   if (wiz.mqttTest === 'failed') {
     wrap.append(el('div', { class: 'fail-card' },
       el('div', { class: 'head' }, el('b', {}, wiz.mqttErr === 'unreachable' ? "Can't reach that broker" : 'The broker refused that login')),
       el('div', { style: 'font-size:14px;opacity:.8;line-height:1.5' }, wiz.mqttErr === 'unreachable'
-        ? `Nothing answered at ${cfg.mqtt.host}. Check the address and that the broker is running.`
-        : `Connected to ${cfg.mqtt.host}, but it rejected the username or password.`),
+        ? `Nothing answered at ${mqttHostValue()}. Check the address and that the broker is running.`
+        : `Connected to ${mqttHostValue()}, but it rejected the username or password.`),
       el('div', { style: 'display:flex;gap:10px' },
         el('button', { class: 'cta-btn', style: 'flex:1', onclick: () => { wiz.mqttTest = ''; renderWizard(); } }, 'Fix the details'),
         el('button', { class: 'pill-btn', style: 'flex:1', onclick: () => { set('mqtt.enabled', false, true); wiz.step = 6; renderWizard(); } }, 'Set up later'))));
@@ -1273,8 +1287,8 @@ function wizHa() {
   wrap.append(
     el('div', { class: 'field-hint' }, 'AmbiWled announces itself over your MQTT broker — the same one Home Assistant uses.'),
     el('div', { class: 'field' }, el('label', {}, 'Broker address'),
-      el('input', { class: 'input', id: 'wiz-mqtt-host', value: cfg.mqtt.host, placeholder: '192.168.1.10:1883',
-        onchange: (ev) => set('mqtt.host', ev.target.value.trim(), true) })),
+      el('input', { class: 'input', id: 'wiz-mqtt-host', value: mqttHostValue(), placeholder: '192.168.1.10:1883',
+        onchange: (ev) => setMqttHostPort(ev.target.value) })),
     el('div', { class: 'field' }, el('label', {}, 'Username'),
       el('input', { class: 'input', value: cfg.mqtt.username, placeholder: 'Leave blank if the broker is open',
         onchange: (ev) => set('mqtt.username', ev.target.value.trim(), true) })),
@@ -1305,13 +1319,12 @@ async function wizNext() {
   if (wiz.step === 5 && cfg.mqtt.enabled) {
     if (wiz.mqttTest === 'testing') return;
     wiz.mqttTest = 'testing'; renderWizard();
-    const [host, portStr] = String(cfg.mqtt.host).split(':');
     const passInput = $('#wiz-mqtt-pass');
     const password = passInput ? passInput.value : '';
     try {
       const r = await fetch('/api/mqtt/test', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ host, port: parseInt(portStr || '1883', 10), username: cfg.mqtt.username, password }),
+        body: JSON.stringify({ host: cfg.mqtt.host, port: cfg.mqtt.port, username: cfg.mqtt.username, password }),
       });
       const data = await r.json();
       if (data.ok) {
