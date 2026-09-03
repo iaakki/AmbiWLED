@@ -22,7 +22,7 @@
     "corner_blend": true,
     "edges": [
       {
-        "name": "tv_wall",
+        "name": "front",
         "pixel_start": 0,
         "pixel_count": 133,
         "source": "top",
@@ -30,16 +30,24 @@
         "brightness": 1.0
       },
       {
-        "name": "right_side",
+        "name": "left",
         "pixel_start": 133,
+        "pixel_count": 98,
+        "source": "left",
+        "reversed": false,
+        "brightness": 1.0
+      },
+      {
+        "name": "right",
+        "pixel_start": 231,
         "pixel_count": 98,
         "source": "right",
         "reversed": false,
         "brightness": 1.0
       },
       {
-        "name": "rear",
-        "pixel_start": 231,
+        "name": "back",
+        "pixel_start": 329,
         "pixel_count": 133,
         "source": "synth_gradient",
         "synth_from": [
@@ -50,15 +58,7 @@
           "left",
           0
         ],
-        "mirror_of": "tv_wall",
-        "reversed": false,
-        "brightness": 1.0
-      },
-      {
-        "name": "left_side",
-        "pixel_start": 364,
-        "pixel_count": 98,
-        "source": "left",
+        "mirror_of": "front",
         "reversed": false,
         "brightness": 1.0
       }

@@ -17,7 +17,7 @@ def test_defaults_are_valid(cfg):
 
 
 def test_overlap_is_rejected(cfg):
-    cfg["mapping"]["edges"][1]["pixel_start"] = 100   # tv_wall runs to 132
+    cfg["mapping"]["edges"][1]["pixel_start"] = 100   # front runs to 132
     assert errors_for(cfg, "overlaps")
 
 

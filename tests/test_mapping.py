@@ -41,11 +41,11 @@ def test_edges_draw_from_their_own_source(cfg, layout):
         s, n = e["pixel_start"], e["pixel_count"]
         used[e["name"]] = {names[i] for i in np.where(w[s : s + n].sum(axis=0) > 1e-6)[0]}
 
-    assert {n for n in used["tv_wall"] if n.startswith("top")} == {f"top[{i}]" for i in range(11)}
-    assert {n for n in used["right_side"] if n.startswith("right")} == {f"right[{i}]" for i in range(5)}
-    assert {n for n in used["left_side"] if n.startswith("left")} == {f"left[{i}]" for i in range(5)}
-    # The synthesised rear uses only the two screen bottom corners.
-    assert used["rear"] == {"right[4]", "left[0]"}
+    assert {n for n in used["front"] if n.startswith("top")} == {f"top[{i}]" for i in range(11)}
+    assert {n for n in used["right"] if n.startswith("right")} == {f"right[{i}]" for i in range(5)}
+    assert {n for n in used["left"] if n.startswith("left")} == {f"left[{i}]" for i in range(5)}
+    # The synthesised back uses only the two screen bottom corners.
+    assert used["back"] == {"right[4]", "left[0]"}
 
 
 def test_corner_blend_reduces_the_seam(cfg, layout):
@@ -56,7 +56,7 @@ def test_corner_blend_reduces_the_seam(cfg, layout):
     off_cfg["mapping"]["corner_blend"] = False
     plain = Mapper().build(off_cfg, layout) @ zones
 
-    seam = 133  # tv_wall -> right_side boundary
+    seam = 133  # front -> left boundary
     blended_step = np.abs(blended[seam - 1] - blended[seam]).max()
     plain_step = np.abs(plain[seam - 1] - plain[seam]).max()
 
@@ -89,7 +89,7 @@ def test_no_banding_within_an_edge(cfg, layout):
 
 @pytest.mark.parametrize("mode", ["synth_gradient", "mirror_top", "average", "off"])
 def test_rear_synthesis_modes(cfg, layout, mode):
-    rear = next(e for e in cfg["mapping"]["edges"] if e["name"] == "rear")
+    rear = next(e for e in cfg["mapping"]["edges"] if e["name"] == "back")
     rear["source"] = mode
     m = Mapper()
     w = m.build(cfg, layout)
@@ -118,7 +118,7 @@ def test_reversed_flips_a_direct_edges_zone_order(cfg, layout):
 
     cfg["mapping"]["corner_blend"] = False
     for e in cfg["mapping"]["edges"]:
-        if e["name"] == "tv_wall":
+        if e["name"] == "front":
             e["reversed"] = True
     flipped = Mapper().build(cfg, layout) @ zones
 
@@ -137,36 +137,58 @@ def test_reversed_flips_a_synth_edges_pixel_order(cfg, layout):
     base = Mapper().build(cfg, layout) @ zones
 
     for e in cfg["mapping"]["edges"]:
-        if e["name"] == "rear":  # synth_gradient in the fixture config
+        if e["name"] == "back":  # synth_gradient in the fixture config
             e["reversed"] = True
     flipped = Mapper().build(cfg, layout) @ zones
-    a, b = 231, 231 + 133
+    a, b = 329, 329 + 133
     assert np.allclose(flipped[a:b], base[a:b][::-1], atol=1e-3)
 
 
-def test_reversed_keeps_corner_blend_attached_to_the_right_neighbour(cfg, layout):
+def test_reversed_keeps_corner_blend_attached_to_the_right_neighbour():
     """The subtlety `reversed` has to hide: with corner blending on, flipping
     a direct edge must not relocate its blended pixel to the wrong end. A
     plain row-reversal (the naive "one field" implementation) would do
     exactly that, since the blend was computed for the un-flipped geometry.
-    """
-    plain = Mapper().build(cfg, layout)  # corner_blend defaults on
-    left_zone = layout.offset("left")
-    left_count = layout.count("left")
-    # tv_wall borders left_side (its predecessor in edge order): pixel 0
-    # should carry some weight from left_side's zones.
-    assert plain[0, left_zone : left_zone + left_count].sum() > 0
 
-    for e in cfg["mapping"]["edges"]:
-        if e["name"] == "tv_wall":
-            e["reversed"] = True
-    reversed_built = Mapper().build(cfg, layout)
+    Built as its own small three-edge config rather than reusing the fixture:
+    the fixture's default `back` edge happens to blend the same zone at both
+    of `front`'s ends (its synth_gradient endpoint coincides with `left`'s
+    own first zone), which would make a naive reversal indistinguishable
+    from the correct one - not because the implementation is right, but by
+    accident of that particular geometry. Distinct predecessor/successor
+    zones rule that out.
+    """
+    # left=3px/3 zones, right=3px/3 zones: front's step (7/6) does not land
+    # exactly on a pixel centre, so the blend is a real fraction, not the
+    # degenerate t=1.0 a round step-size would give.
+    small_layout = Layout([("left", 3), ("top", 6), ("right", 3)])
+    cfg = {
+        "led": {"count": 13},
+        "mapping": {
+            "corner_blend": True,
+            "edges": [
+                {"name": "left", "pixel_start": 0, "pixel_count": 3, "source": "left"},
+                {"name": "front", "pixel_start": 3, "pixel_count": 7, "source": "top"},
+                {"name": "right", "pixel_start": 10, "pixel_count": 3, "source": "right"},
+            ],
+        },
+    }
+
+    plain = Mapper().build(cfg, small_layout)
+    left_zone = small_layout.offset("left")
+    left_count = small_layout.count("left")
+    # front's predecessor in edge order is left: pixel 3 (front's first)
+    # should carry some weight from left's zones.
+    assert plain[3, left_zone : left_zone + left_count].sum() > 0
+
+    cfg["mapping"]["edges"][1]["reversed"] = True
+    reversed_built = Mapper().build(cfg, small_layout)
     # Still true after flipping: the blend belongs to the physical seam,
     # not to whichever TV content ends up displayed there.
-    assert reversed_built[0, left_zone : left_zone + left_count].sum() > 0
+    assert reversed_built[3, left_zone : left_zone + left_count].sum() > 0
 
-    naive = plain[0:133][::-1]
-    assert not np.allclose(reversed_built[0:133], naive, atol=1e-3)
+    naive = plain[3:10][::-1]
+    assert not np.allclose(reversed_built[3:10], naive, atol=1e-3)
 
 
 def test_layout_change_is_handled(cfg, layout):

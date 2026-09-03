@@ -48,9 +48,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "mapping": {
         "corner_blend": True,
+        # Four canonical slots - front/left/right/back - is the model the
+        # setup wizard and the UI's "which sides have strip" step both work
+        # in. 1-4 may be present; a fresh install ships all four.
         "edges": [
             {
-                "name": "tv_wall",
+                "name": "front",
                 "pixel_start": 0,
                 "pixel_count": 133,
                 "source": "top",
@@ -58,29 +61,33 @@ DEFAULT_CONFIG: dict[str, Any] = {
                 "brightness": 1.0,
             },
             {
-                "name": "right_side",
+                "name": "left",
                 "pixel_start": 133,
+                "pixel_count": 98,
+                "source": "left",
+                "reversed": False,
+                "brightness": 1.0,
+            },
+            {
+                "name": "right",
+                "pixel_start": 231,
                 "pixel_count": 98,
                 "source": "right",
                 "reversed": False,
                 "brightness": 1.0,
             },
             {
-                "name": "rear",
-                "pixel_start": 231,
+                "name": "back",
+                "pixel_start": 329,
                 "pixel_count": 133,
+                # synth_gradient, not mirror_top: it still contributes real
+                # zone references to its neighbours' corner blending, so the
+                # front/left and front/right seams stay smooth by default.
+                # mirror_top is a fine choice too, just a sharper-edged one.
                 "source": "synth_gradient",
                 "synth_from": ["right", -1],
                 "synth_to": ["left", 0],
-                "mirror_of": "tv_wall",
-                "reversed": False,
-                "brightness": 1.0,
-            },
-            {
-                "name": "left_side",
-                "pixel_start": 364,
-                "pixel_count": 98,
-                "source": "left",
+                "mirror_of": "front",
                 "reversed": False,
                 "brightness": 1.0,
             },

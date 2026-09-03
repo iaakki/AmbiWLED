@@ -137,11 +137,11 @@ async def test_identify_by_range_works_without_a_valid_config(running):
 async def test_identify_by_name_still_works(running):
     _, bridge, base, session, _ = running
     async with session.ws_connect(f"{base}/ws") as ws:
-        await ws.send_json({"type": "identify", "edge": "rear", "seconds": 5})
+        await ws.send_json({"type": "identify", "edge": "back", "seconds": 5})
         await asyncio.sleep(0.2)
     frame = bridge._identify_frame()
     lit = [i for i in range(462) if frame[i].any()]
-    assert lit[0] == 231 and lit[-1] == 363
+    assert lit[0] == 329 and lit[-1] == 461
 
 
 async def test_identify_expires(running):
@@ -202,7 +202,7 @@ async def test_segment_push_endpoint_reports_failure_without_a_controller(runnin
     assert data["ok"] is False
     assert data["results"][0]["ok"] is False
     # The derived segments are still returned, so the UI can show what it tried.
-    assert [s["n"] for s in data["segments"]] == ["tv_wall", "right_side", "rear", "left_side"]
+    assert [s["n"] for s in data["segments"]] == ["front", "left", "right", "back"]
 
 
 async def test_segment_push_needs_an_enabled_target(running):

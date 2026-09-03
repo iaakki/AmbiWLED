@@ -64,13 +64,13 @@ async def test_mapping_matches_the_source_zones(wired):
     await _wait_for(lambda: bridge.last_frame[60].argmax() == 1, timeout=5)
 
     f = bridge.last_frame
-    assert f[60].argmax() == 1, "middle of the TV wall should come from top (green)"
-    assert f[180].argmax() == 2, "middle of the right run should come from right (blue)"
-    assert f[420].argmax() == 0, "middle of the left run should come from left (red)"
-    # The synthesised rear blends the two bottom corners: red and blue, no green.
-    rear = f[231:364]
-    assert rear[:, 1].max() < 40
-    assert rear[0].argmax() == 2 and rear[-1].argmax() == 0
+    assert f[60].argmax() == 1, "middle of the front run should come from top (green)"
+    assert f[182].argmax() == 0, "middle of the left run should come from left (red)"
+    assert f[280].argmax() == 2, "middle of the right run should come from right (blue)"
+    # The synthesised back blends the two bottom corners: blue to red, no green.
+    back = f[329:462]
+    assert back[:, 1].max() < 40
+    assert back[0].argmax() == 2 and back[-1].argmax() == 0
 
 
 async def test_emission_stops_when_the_tv_goes_off(wired):
@@ -145,14 +145,14 @@ async def test_metrics_report_reality(wired):
 
 def edges_for(brightness_by_name: dict[str, float]) -> list[dict]:
     edges = [
-        {"name": "tv_wall", "pixel_start": 0, "pixel_count": 133, "source": "top",
+        {"name": "front", "pixel_start": 0, "pixel_count": 133, "source": "top",
          "reversed": False},
-        {"name": "right_side", "pixel_start": 133, "pixel_count": 98, "source": "right",
+        {"name": "left", "pixel_start": 133, "pixel_count": 98, "source": "left",
          "reversed": False},
-        {"name": "rear", "pixel_start": 231, "pixel_count": 133, "source": "synth_gradient",
+        {"name": "right", "pixel_start": 231, "pixel_count": 98, "source": "right",
+         "reversed": False},
+        {"name": "back", "pixel_start": 329, "pixel_count": 133, "source": "synth_gradient",
          "synth_from": ["right", -1], "synth_to": ["left", 0],
-         "reversed": False},
-        {"name": "left_side", "pixel_start": 364, "pixel_count": 98, "source": "left",
          "reversed": False},
     ]
     for e in edges:
@@ -171,13 +171,13 @@ async def test_dimming_the_rear_edge_only_affects_those_pixels(wired):
     cfg["source"] = bridge.cfg["source"]
     cfg["output"] = bridge.cfg["output"]
     cfg["frames"] = dict(bridge.cfg["frames"])
-    cfg["mapping"]["edges"] = edges_for({"rear": 0.3})
+    cfg["mapping"]["edges"] = edges_for({"back": 0.3})
     bridge.apply_config(cfg)
 
     assert bridge.edge_scale is not None
-    assert np.allclose(bridge.edge_scale[0:133], 1.0)      # tv_wall
-    assert np.allclose(bridge.edge_scale[231:364], 0.3)    # rear
-    assert np.allclose(bridge.edge_scale[364:462], 1.0)    # left_side
+    assert np.allclose(bridge.edge_scale[0:133], 1.0)      # front
+    assert np.allclose(bridge.edge_scale[329:462], 0.3)    # back
+    assert np.allclose(bridge.edge_scale[133:231], 1.0)    # left
 
 
 async def test_the_trim_actually_dims_the_streamed_frame(wired):
@@ -187,11 +187,11 @@ async def test_the_trim_actually_dims_the_streamed_frame(wired):
     cfg["source"] = bridge.cfg["source"]
     cfg["output"] = bridge.cfg["output"]
     cfg["frames"] = dict(bridge.cfg["frames"])
-    cfg["mapping"]["edges"] = edges_for({"rear": 0.25})
+    cfg["mapping"]["edges"] = edges_for({"back": 0.25})
     bridge.apply_config(cfg)
 
     await _wait_for(lambda: bridge.last_frame[50].max() > 100, timeout=6)
-    front = int(bridge.last_frame[50].max())     # tv_wall: undimmed
-    rear = int(bridge.last_frame[300].max())     # rear: dimmed to 25%
+    front = int(bridge.last_frame[50].max())      # front: undimmed
+    rear = int(bridge.last_frame[400].max())      # back: dimmed to 25%
     assert front > 150
     assert 0 < rear < front // 2
