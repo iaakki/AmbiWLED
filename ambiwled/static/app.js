@@ -559,7 +559,7 @@ function pageColour(body) {
         el('div', { class: 'thumb', id: 'floor-thumb' })),
       el('div', { class: 'field-hint' }, 'Stops very dark scenes flickering on some strips.')),
     el('div', {},
-      el('div', { class: 'field-title' }, el('span', { class: 'name' }, 'Zone blending'),
+      el('div', { class: 'field-title' }, el('span', { class: 'name' }, 'Zone blend'),
         el('span', { class: 'value', id: 'zoneblend-label' })),
       el('div', { class: 'slider small', id: 'zoneblend-track' },
         el('div', { class: 'fill-track' }, el('div', { class: 'fill', id: 'zoneblend-fill', style: 'background:linear-gradient(90deg,#8d8d8d,var(--color-accent))' })),
