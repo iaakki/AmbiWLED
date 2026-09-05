@@ -262,6 +262,7 @@ input.input[readonly] { opacity: .6; cursor: default; }
   position: relative; border-radius: 22px; overflow: hidden; background: #0c0a08; aspect-ratio: 16/6;
   animation: ambihue 26s linear infinite;
 }
+.ambient-strip .ambient-fill { position: absolute; inset: 0; transition: background 1.2s ease; }
 .ambient-strip .caption {
   position: absolute; left: 12px; bottom: 9px; font-size: 10px; letter-spacing: .14em;
   text-transform: uppercase; color: rgba(255, 255, 255, .65);

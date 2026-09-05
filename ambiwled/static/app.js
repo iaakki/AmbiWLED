@@ -362,6 +362,7 @@ function renderPreviewFromPixels() {
 
 function renderLive() {
   renderPreviewFromPixels();
+  renderAmbientStrip();
   const on = get('mode') !== 'off';
   const emitting = !!metrics.emitting;
   const line = $('#status-line'), sub = $('#status-sub');
@@ -502,6 +503,7 @@ function renderPage() {
 function pageHome(body) {
   body.append(el('div', { class: 'page' },
     el('div', { class: 'ambient-strip' },
+      el('div', { class: 'ambient-fill', id: 'ambient-fill' }),
       el('div', { class: 'caption' }, 'live · one websocket')),
     el('div', { class: 'summary-list', id: 'summary-list' }),
     el('div', { class: 'field-hint' }, 'The preview keeps streaming while you move between these pages — one socket, never renegotiated.'),
@@ -510,6 +512,16 @@ function pageHome(body) {
   ));
   renderSummaryRows();
   renderModeSwitch();
+  renderAmbientStrip();
+}
+function renderAmbientStrip() {
+  const fill = $('#ambient-fill');
+  if (!fill) return;
+  const slots = presentSlots();
+  const colours = slots.length ? slots.map((s) => edgeAverageColour(s) || '#0c0a08') : ['#0c0a08'];
+  fill.style.background = colours.length > 1
+    ? `linear-gradient(90deg, ${colours.join(', ')})`
+    : colours[0];
 }
 function renderModeSwitch() {
   const wrap = $('#mode-wrap');
