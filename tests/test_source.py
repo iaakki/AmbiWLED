@@ -187,6 +187,59 @@ async def test_mid_stream_layout_change_is_picked_up(tv):
     assert frames[-1][0].shape == (26, 3)
 
 
+# -- paired screen state: the real fix for Quick-Start standby --------------
+#
+# Some Philips TVs keep answering /ambilight/... successfully - and
+# /ambilight/power keeps claiming "on" - for a long grace period after the
+# screen actually turns off (Quick-Start network standby). Measured directly
+# against a real 2018 Android TV set: ambilight/power said "On" with an
+# all-black payload for minutes after power-off. Once paired, /screenstate
+# tells the truth immediately and must win over the ambilight-based guess.
+
+async def test_paired_screen_state_off_overrides_ambilight_still_claiming_on():
+    from tests.test_pairing import FakeTvHttps
+
+    tv = await FakeTV(power="On").start()          # keeps claiming "on"
+    https = await FakeTvHttps(screenstate="Off").start()  # tells the truth
+    try:
+        device_id, auth_key = ("paired-device", https.auth_key)
+        https.granted = (device_id, auth_key)       # pre-paired, as if from an earlier session
+
+        cfg = {"source": {
+            "tv_ip": "127.0.0.1", "port": tv.port, "api_version": None,
+            "endpoint": "processed", "poll_hz": 50.0, "request_timeout_s": 1.0,
+            "fail_threshold": 2, "off_probe_interval_s": 0.2, "adaptive_backoff": False,
+            "ambilight_power_check_s": 0.05,
+            "pairing": {"device_id": device_id, "auth_key": auth_key},
+        }}
+        states = []
+        p = SourcePoller(cfg, lambda z, l: None, on_state=states.append)
+        p._screen_port = https.port
+        p._screen_scheme = "http"
+
+        await p.start()
+        await _wait_for(lambda: p.state == "tv_off", timeout=5)
+        await p.stop()
+
+        assert p.ambilight_on is True, "ambilight itself must still be reporting on - that's the whole bug"
+        assert p.screen_on is False
+        assert "tv_off" in states
+    finally:
+        await tv.stop()
+        await https.stop()
+
+
+async def test_screen_state_not_paired_leaves_ambilight_detection_untouched(tv):
+    """No pairing configured: screen_on stays unknown and never overrides
+    the existing ambilight-based state - fully backward compatible."""
+    p, frames = await poller_for(tv)
+    await p.start()
+    await _wait_for(lambda: len(frames) >= 2)
+    await p.stop()
+    assert p.screen_on is None
+    assert p.state == "streaming"
+
+
 # -- helpers -----------------------------------------------------------------
 
 async def _wait_for(predicate, timeout=5.0, interval=0.02):

@@ -415,6 +415,8 @@ class Bridge:
             "emitting": self.should_emit(),
             "ambilight_power": self.poller.ambilight_on,
             "ambilight_mode": self.poller.ambilight_mode,
+            "screen_on": self.poller.screen_on,
+            "tv_paired": bool(self.poller.pair_device_id and self.poller.pair_auth_key),
             "targets_online": self.health.online_hosts(),
             "targets": {h: st.get("online") for h, st in self.health.status.items()},
             "controllers": self.health.info,

@@ -37,6 +37,8 @@ let advanced = false;
 let page = 'home';
 let wiz = null;               // {step, countIdx, pick, mqttTest, mqttErr} while running
 let pwEdit = false;            // Integrations page: password field unlocked
+let pairingStep = 'idle';      // Source page: 'idle' | 'awaiting-pin' | 'checking'
+let pairingError = '';
 let flashEdge = '';
 let confirmState = null;
 
@@ -402,7 +404,8 @@ function diagText() {
   const m = metrics;
   const load = Array.isArray(m.load_avg) ? m.load_avg.map((v) => v.toFixed(2)).join(' ') : '–';
   return `ws   /ws        open · ${m.source_fps ?? 0} fps in · ${m.output_fps ?? 0} fps out\n`
-    + `tv   ${cfg.source.tv_ip || '(not set)'} ${m.tv_state || '?'} · ${m.source_latency_ms ?? '–'} ms · ${m.failed_polls ?? 0} failed polls\n`
+    + `tv   ${cfg.source.tv_ip || '(not set)'} ${m.tv_state || '?'} · ${m.source_latency_ms ?? '–'} ms · ${m.failed_polls ?? 0} failed polls`
+    + `${m.tv_paired ? ` · screen ${m.screen_on === null || m.screen_on === undefined ? 'unknown' : (m.screen_on ? 'on' : 'off')}` : ''}\n`
     + `wled ${(cfg.output.targets[0] || {}).host || '(not set)'} ${metrics.targets_online ? 'ok' : 'unreachable'}\n`
     + `mqtt ${cfg.mqtt.enabled ? (metrics.mqtt && metrics.mqtt.connected ? 'connected' : 'connecting') : 'disabled'}\n`
     + `cpu  ${m.cpu_percent ?? 0}% of 1 core · ${m.cpu_count ?? '?'} core${m.cpu_count === 1 ? '' : 's'} available · load ${load}`;
@@ -706,6 +709,8 @@ function pageSource(body) {
       el('div', { class: 'field-hint' }, pollHint()),
       el('div', { class: 'chip-row', id: 'poll-chips' })),
     el('div', { class: 'field-hint', id: 'poll-warn' }),
+    el('div', { style: 'height:1px;background:var(--color-divider)' }),
+    el('div', { id: 'pairing-box' }),
   ));
 
   const tvIp = $('#tv-ip');
@@ -724,7 +729,100 @@ function pageSource(body) {
     }, v + ' fps'));
   }
   pollWarn();
+  renderPairingBox();
   pageSourceMeta();
+}
+
+/* -- TV pairing: unlocks the real screen-power signal --------------------
+   Some Philips TVs keep answering /ambilight/power with "on" for minutes
+   after the screen actually goes dark (Quick-Start network standby).
+   Pairing once gets access to /powerstate and /screenstate, which don't. */
+
+function renderPairingBox() {
+  const box = $('#pairing-box');
+  if (!box) return;
+  box.innerHTML = '';
+  const paired = !!(cfg.source.pairing && cfg.source.pairing.device_id);
+
+  if (paired) {
+    box.append(
+      el('div', { class: 'field-title' }, el('span', { class: 'name' }, 'Accurate power detection'),
+        el('span', { class: 'value' }, 'Paired')),
+      el('div', { class: 'field-hint' }, "Screen on/off comes straight from the TV, so the strip reverts promptly even through standby - not just once the TV stops answering entirely."),
+      el('button', { class: 'pill-btn', onclick: () => unpairTv() }, 'Unpair'),
+    );
+    return;
+  }
+
+  box.append(
+    el('div', { class: 'field-title' }, el('span', { class: 'name' }, 'Accurate power detection'), el('span', { class: 'value' }, 'Not paired')),
+    el('div', { class: 'field-hint' }, "Without this, AmbiWled only knows the TV is off once it stops answering at all - which some sets delay for a while after the screen goes dark. Pairing (one-time) gets a truthful answer instead."),
+  );
+
+  if (pairingStep === 'idle') {
+    box.append(el('button', { class: 'pill-btn', onclick: () => startTvPairing() }, 'Pair for accurate detection'));
+  } else if (pairingStep === 'awaiting-pin') {
+    box.append(
+      el('div', { class: 'field' }, el('label', {}, 'PIN shown on the TV'),
+        el('input', { class: 'input', id: 'pairing-pin', inputmode: 'numeric', placeholder: '1234' })),
+      el('div', { style: 'display:flex;gap:8px' },
+        el('button', { class: 'cta-btn', onclick: () => confirmTvPairing() }, 'Confirm'),
+        el('button', { class: 'pill-btn', onclick: () => { pairingStep = 'idle'; renderPairingBox(); } }, 'Cancel')),
+    );
+  } else if (pairingStep === 'checking') {
+    box.append(el('div', { class: 'field-hint' }, 'Checking…'));
+  }
+  if (pairingError) box.append(el('div', { class: 'field-hint', style: 'color:var(--err)' }, pairingError));
+}
+
+async function startTvPairing() {
+  pairingError = '';
+  pairingStep = 'checking';
+  renderPairingBox();
+  try {
+    const r = await fetch('/api/tv/pair/start', { method: 'POST' });
+    const data = await r.json();
+    if (!r.ok) { pairingError = data.error || 'could not start pairing'; pairingStep = 'idle'; renderPairingBox(); return; }
+    pairingStep = 'awaiting-pin';
+    renderPairingBox();
+  } catch (err) {
+    pairingError = 'could not reach the server';
+    pairingStep = 'idle';
+    renderPairingBox();
+  }
+}
+
+async function confirmTvPairing() {
+  const pin = ($('#pairing-pin')?.value || '').trim();
+  if (!pin) return;
+  pairingError = '';
+  pairingStep = 'checking';
+  renderPairingBox();
+  try {
+    const r = await fetch('/api/tv/pair/confirm', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pin }),
+    });
+    const data = await r.json();
+    if (!r.ok) {
+      pairingError = data.error || 'pairing failed';
+      pairingStep = 'awaiting-pin';
+      renderPairingBox();
+      return;
+    }
+    cfg = data.config;
+    pairingStep = 'idle';
+    toast('Paired');
+    renderPairingBox();
+  } catch (err) {
+    pairingError = 'could not reach the server';
+    pairingStep = 'awaiting-pin';
+    renderPairingBox();
+  }
+}
+
+function unpairTv() {
+  set('source.pairing', { device_id: '', auth_key: '' }, true);
+  renderPairingBox();
 }
 function pollHint() { return 'Frames a second read off the TV. Frame generation fills the gap between this and what the strip gets.'; }
 function pollWarn() {

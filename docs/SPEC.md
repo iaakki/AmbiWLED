@@ -65,6 +65,19 @@ Philips TV (JointSPACE)          Bridge service (any Docker host)         WLED c
 - Consecutive request failures (default 3) → TV considered off → stop emitting.
 - Continue probing at a slow rate (default every 5 s) to detect wake-up.
 - No separate integration needed; the poll loop is the detector.
+- MEASURED (2026-09-05, real Philips Android TV, `os_type: MSAF_2018_O`):
+  the JointSPACE API itself is not sufficient for this. Both
+  `/ambilight/processed` and `/ambilight/power` kept answering
+  successfully - `power: "On"`, zones all black - for minutes after the
+  screen physically turned off, a Philips "Quick Start" network-standby
+  behaviour that cannot be disabled without also losing the ability to
+  wake the TV over the network. Pairing once (`ambiwled/pairing.py`, a
+  digest-auth handshake reverse-engineered by the open-source JointSPACE
+  client community, not invented here) unlocks `/powerstate` and
+  `/screenstate` over HTTPS on port 1926, which answer truthfully
+  regardless of standby - confirmed live against the same set. When
+  paired, that answer overrides the ambilight-based guess; unpaired
+  installs fall back to the behaviour above, unchanged.
 
 ### FR-3 — Mapping
 Transform 21 source zones into 462 output pixels. See §3.

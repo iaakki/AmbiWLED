@@ -42,6 +42,18 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # Poll /ambilight/power so "TV on but Ambilight off" is distinguishable
         # from "TV showing a black frame".  0 disables the check.
         "ambilight_power_check_s": 3.0,
+        # Some Philips TVs keep the JointSPACE API answering - and
+        # /ambilight/power claiming "on" - for a long grace period after the
+        # screen actually turns off (network/Quick-Start standby). Pairing
+        # once (device_id + auth_key, filled in by the pairing flow, not
+        # hand-typed) unlocks /powerstate and /screenstate over HTTPS on
+        # port 1926 - the TV's own truthful answer to "is the screen really
+        # on", independent of that standby quirk. Blank until paired; the
+        # existing ambilight-based detection is what runs until then.
+        "pairing": {
+            "device_id": "",
+            "auth_key": "",
+        },
     },
     "led": {
         "count": 462,
@@ -179,30 +191,43 @@ def _is_host(value: Any) -> bool:
     return bool(_HOSTNAME.match(value)) and not value.replace(".", "").isdigit()
 
 
-# Never handed out over the API; see redacted() / unredact().
-SECRET_PATHS = (("mqtt", "password"),)
+# Never handed out over the API; see redacted() / unredact(). Each path is a
+# sequence of keys reaching the secret field, arbitrarily nested.
+SECRET_PATHS = (("mqtt", "password"), ("source", "pairing", "auth_key"))
 REDACTED = "********"
+
+
+def _get_path(d: dict[str, Any], path: tuple[str, ...]) -> Any:
+    for k in path[:-1]:
+        d = d.get(k, {})
+    return d.get(path[-1])
+
+
+def _set_path(d: dict[str, Any], path: tuple[str, ...], value: Any) -> None:
+    for k in path[:-1]:
+        d = d.setdefault(k, {})
+    d[path[-1]] = value
 
 
 def redacted(cfg: dict[str, Any]) -> dict[str, Any]:
     """A copy safe to serve: secrets replaced by a sentinel.
 
-    The web UI is unauthenticated on the LAN, so the broker password must not
-    be readable from it.
+    The web UI is unauthenticated on the LAN, so the broker password and the
+    TV pairing key must not be readable from it.
     """
     out = copy.deepcopy(cfg)
-    for section, key in SECRET_PATHS:
-        if out.get(section, {}).get(key):
-            out[section][key] = REDACTED
+    for path in SECRET_PATHS:
+        if _get_path(out, path):
+            _set_path(out, path, REDACTED)
     return out
 
 
 def unredact(candidate: dict[str, Any], current: dict[str, Any]) -> dict[str, Any]:
     """Turn the sentinel back into the stored secret, so a UI round-trip that
     never saw the password cannot erase it."""
-    for section, key in SECRET_PATHS:
-        if candidate.get(section, {}).get(key) == REDACTED:
-            candidate[section][key] = current.get(section, {}).get(key, "")
+    for path in SECRET_PATHS:
+        if _get_path(candidate, path) == REDACTED:
+            _set_path(candidate, path, _get_path(current, path) or "")
     return candidate
 
 

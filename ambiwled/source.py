@@ -10,6 +10,7 @@ from typing import Any, Callable
 import aiohttp
 import numpy as np
 
+from . import pairing
 from .mapping import Layout
 
 log = logging.getLogger(__name__)
@@ -36,6 +37,15 @@ class SourcePoller:
         self.ambilight_on: bool | None = None
         self.ambilight_mode: str | None = None
         self._power_checked = 0.0
+        # The TV's own truthful screen state, once paired - see pairing.py.
+        # None: not paired, unreachable, or not checked yet; ambilight-based
+        # detection (ambilight_on above) is what drives state in that case.
+        self.screen_on: bool | None = None
+        self._screen_checked = 0.0
+        # Real port/scheme (HTTPS:1926) always, except in tests, which point
+        # these at a fake plain-HTTP server instead of standing up TLS.
+        self._screen_port = pairing.HTTPS_PORT
+        self._screen_scheme = "https"
         self.api_version: int | None = None
         self.consecutive_failures = 0
         self.failed_polls = 0
@@ -65,6 +75,11 @@ class SourcePoller:
         self.off_probe_interval = float(s.get("off_probe_interval_s", 5.0))
         self.adaptive_backoff = bool(s.get("adaptive_backoff", True))
         self.power_check_interval = float(s.get("ambilight_power_check_s", 3.0))
+        pair = s.get("pairing", {})
+        self.pair_device_id = str(pair.get("device_id") or "")
+        self.pair_auth_key = str(pair.get("auth_key") or "")
+        if not (self.pair_device_id and self.pair_auth_key):
+            self.screen_on = None
         if self.configured_api in (1, 6):
             self.api_version = int(self.configured_api)
 
@@ -198,6 +213,34 @@ class SourcePoller:
             # Not fatal: fall back to treating the stream itself as the signal.
             self.ambilight_on = None
 
+    async def _check_screen_state(self) -> None:
+        """Once paired, the TV's own truthful answer overrides everything
+        else: /ambilight/power and the zone data both keep claiming "on"
+        through Quick-Start network standby, sometimes for minutes after
+        the screen actually went dark - measured directly against real
+        hardware, not assumed. /screenstate does not lie."""
+        if not (self.pair_device_id and self.pair_auth_key):
+            self.screen_on = None
+            return
+        now = time.monotonic()
+        if now - self._screen_checked < self.power_check_interval:
+            return
+        self._screen_checked = now
+        assert self.session is not None
+        state = await pairing.get_screen_state(
+            self.session, self.tv_ip, self.pair_device_id, self.pair_auth_key,
+            port=self._screen_port, timeout=self.request_timeout, scheme=self._screen_scheme,
+        )
+        if state is None:
+            # Unreachable or rejected: fall back to ambilight-based detection
+            # rather than assume either on or off from a missing answer.
+            self.screen_on = None
+            return
+        on = state == "On"
+        if on != self.screen_on:
+            log.info("TV screen state: %s", state)
+        self.screen_on = on
+
     async def _poll_once(self) -> bool:
         url = f"http://{self.tv_ip}:{self.port}/{self.api_version}/ambilight/{self.endpoint}"
         started = time.monotonic()
@@ -255,7 +298,13 @@ class SourcePoller:
                 if ok:
                     self.consecutive_failures = 0
                     await self._check_ambilight_power()
-                    self._set_state("ambilight_off" if self.ambilight_on is False else "streaming")
+                    await self._check_screen_state()
+                    if self.screen_on is False:
+                        # The TV's own answer wins over ambilight's, which
+                        # both keep saying "on" through Quick-Start standby.
+                        self._set_state("tv_off")
+                    else:
+                        self._set_state("ambilight_off" if self.ambilight_on is False else "streaming")
                 else:
                     raise ValueError("unrecognised Ambilight payload")
             except asyncio.CancelledError:

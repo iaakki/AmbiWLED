@@ -60,6 +60,14 @@ def udp_sink():
     sock.close()
 
 
+@pytest.fixture
+async def aiohttp_client_session():
+    """A plain client session, for tests that talk to a fake server directly
+    rather than through Bridge/Server (test_pairing.py)."""
+    async with aiohttp.ClientSession() as session:
+        yield session
+
+
 @pytest.fixture(scope="session")
 def browser():
     """Headless Firefox, for the handful of tests in test_ui.py that check
