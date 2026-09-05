@@ -216,3 +216,58 @@ def test_empty_layout_is_survivable(cfg):
     m = Mapper()
     assert m.build(cfg, Layout([])) is None
     assert m.problems
+
+
+# -- zone_blend: blocky (raw TV zones) <-> softer than a plain 2-tap blend --
+
+def test_zone_blend_default_is_unchanged_from_before_it_existed(cfg, layout):
+    """The whole existing suite runs at cfg's default zone_blend (1.0) and
+    passes unmodified - the strongest evidence this is a real behavioural
+    no-op at the default, not just true for one hand-picked case."""
+    assert cfg["mapping"]["zone_blend"] == 1.0
+    w = Mapper().build(cfg, layout)
+    assert np.allclose(w.sum(axis=1), 1.0, atol=1e-5)
+
+
+def test_zone_blend_zero_is_blocky_raw_zones(cfg, layout):
+    """At 0, each pixel takes its single nearest zone verbatim - a hard
+    step at the midpoint between two zones, not a blend."""
+    cfg["mapping"]["corner_blend"] = False
+    cfg["mapping"]["zone_blend"] = 0.0
+    w = Mapper().build(cfg, layout)
+    # front: 133 px over 11 "top" zones, step ~12.09 px/zone. Zone 0 sits at
+    # pixel 6.05, zone 1 at 18.14 - the midpoint falls exactly at pixel
+    # 12.09, so pixel 11 (x=11.5) is the last one still on zone 0's side,
+    # and pixel 12 (x=12.5) is the first on zone 1's.
+    top0 = layout.offset("top")
+    assert w[11, top0] == pytest.approx(1.0)      # last pixel before the midpoint: entirely zone 0
+    assert w[11, top0 + 1] == 0.0                 # no blending into the neighbour at all
+    assert w[12, top0 + 1] == pytest.approx(1.0)  # first pixel past the midpoint: entirely zone 1
+    assert w[12, top0] == 0.0
+    assert np.allclose(w.sum(axis=1), 1.0, atol=1e-5)
+
+
+def test_zone_blend_above_one_reaches_a_second_neighbour(cfg, layout):
+    """At blend=1 (the default), only the two immediately bracketing zones
+    ever contribute - a third zone away is exactly zero. Widening the
+    kernel must pull a non-adjacent zone in too."""
+    cfg["mapping"]["corner_blend"] = False
+    top0 = layout.offset("top")
+
+    cfg["mapping"]["zone_blend"] = 1.0
+    plain = Mapper().build(cfg, layout)
+    assert plain[6, top0 + 2] == 0.0            # zone 2 has no reach to pixel 6 (zone 0's centre)
+
+    cfg["mapping"]["zone_blend"] = 2.5
+    wide = Mapper().build(cfg, layout)
+    assert wide[6, top0 + 2] > 0.0               # now it does
+    assert np.allclose(wide.sum(axis=1), 1.0, atol=1e-5)
+
+
+def test_zone_blend_out_of_range_is_rejected(cfg):
+    cfg["mapping"]["zone_blend"] = 4.5
+    assert any("zone_blend" in e for e in config_mod.validate(cfg))
+    cfg["mapping"]["zone_blend"] = -0.1
+    assert any("zone_blend" in e for e in config_mod.validate(cfg))
+    cfg["mapping"]["zone_blend"] = 4.0
+    assert config_mod.validate(cfg) == []

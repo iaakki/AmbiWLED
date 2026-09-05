@@ -20,6 +20,7 @@
   },
   "mapping": {
     "corner_blend": true,
+    "zone_blend": 1.0,
     "edges": [
       {
         "name": "front",

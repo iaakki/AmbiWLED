@@ -558,6 +558,15 @@ function pageColour(body) {
         el('div', { class: 'fill-track' }, el('div', { class: 'fill', id: 'floor-fill', style: 'background:linear-gradient(90deg,#2b2622,var(--color-accent-2))' })),
         el('div', { class: 'thumb', id: 'floor-thumb' })),
       el('div', { class: 'field-hint' }, 'Stops very dark scenes flickering on some strips.')),
+    el('div', {},
+      el('div', { class: 'field-title' }, el('span', { class: 'name' }, 'Zone blending'),
+        el('span', { class: 'value', id: 'zoneblend-label' })),
+      el('div', { class: 'slider small', id: 'zoneblend-track' },
+        el('div', { class: 'fill-track' }, el('div', { class: 'fill', id: 'zoneblend-fill', style: 'background:linear-gradient(90deg,#8d8d8d,var(--color-accent))' })),
+        el('div', { class: 'thumb', id: 'zoneblend-thumb' })),
+      el('div', { style: 'display:flex;justify-content:space-between;font-size:12px;opacity:.5;margin-top:7px' },
+        el('span', {}, 'Blocky'), el('span', {}, 'Smooth')),
+      el('div', { class: 'field-hint' }, "How far each LED's colour is drawn from the TV's own zones. Low: each zone shows as a hard block, exactly as the TV sends it. High: blends further across neighbouring zones for a softer look.")),
   );
   body.append(page1);
 
@@ -572,6 +581,16 @@ function pageColour(body) {
   wireSlider($('#floor-track'), $('#floor-thumb'), $('#floor-fill'), 30,
     () => floorPct,
     (pct) => { $('#floor-label').textContent = pct + '%'; set('colour.black_floor', Math.round((pct / 100) * 255)); });
+
+  const zoneBlendPct = Math.round(((cfg.mapping.zone_blend ?? 1) / 4) * 100);
+  $('#zoneblend-label').textContent = (cfg.mapping.zone_blend ?? 1).toFixed(2) + '×';
+  wireSlider($('#zoneblend-track'), $('#zoneblend-thumb'), $('#zoneblend-fill'), 30,
+    () => zoneBlendPct,
+    (pct) => {
+      const v = Math.round((pct / 100) * 4 * 20) / 20; // snap to 0.05 steps
+      $('#zoneblend-label').textContent = v.toFixed(2) + '×';
+      set('mapping.zone_blend', v, true);
+    });
 }
 
 /* -- Auto-dim -- */

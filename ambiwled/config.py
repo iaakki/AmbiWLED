@@ -48,6 +48,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "mapping": {
         "corner_blend": True,
+        # How far each pixel's colour is drawn from the TV's own zones: 1.0
+        # is a plain interpolation between the two nearest zones (unchanged
+        # from before this existed). Below 1.0 narrows that toward showing
+        # each zone as a hard, blocky block - the TV's raw zones, exactly as
+        # sent. Above 1.0 widens it into a softer blend across more zones.
+        "zone_blend": 1.0,
         # Four canonical slots - front/left/right/back - is the model the
         # setup wizard and the UI's "which sides have strip" step both work
         # in. 1-4 may be present; a fresh install ships all four.
@@ -248,6 +254,9 @@ def validate(cfg: dict[str, Any]) -> list[str]:
         return ["led.count must be an integer"]
     if led_count <= 0:
         errors.append("led.count must be greater than zero")
+
+    if not (0.0 <= float(cfg.get("mapping", {}).get("zone_blend", 1.0)) <= 4.0):
+        errors.append("mapping.zone_blend must be between 0 and 4")
 
     edges = cfg.get("mapping", {}).get("edges")
     if not isinstance(edges, list) or not edges:
