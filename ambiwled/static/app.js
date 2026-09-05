@@ -58,7 +58,7 @@ const SOURCE_OPTIONS = [
 ];
 const TABS = [
   ['home', 'Home'], ['colour', 'Colour'], ['dim', 'Auto-dim'], ['source', 'Source'],
-  ['mapping', 'Mapping'], ['output', 'Output'], ['frames', 'Frame generation'],
+  ['mapping', 'Mapping'], ['output', 'Output'],
   ['integrations', 'Integrations'], ['config', 'Config'],
 ];
 
@@ -487,7 +487,7 @@ function renderPage() {
   body.innerHTML = '';
   const renderers = {
     home: pageHome, colour: pageColour, dim: pageDim, source: pageSource,
-    mapping: pageMapping, output: pageOutput, frames: pageFrames,
+    mapping: pageMapping, output: pageOutput,
     integrations: pageIntegrations, config: pageConfig,
   };
   (renderers[page] || pageHome)(body);
@@ -502,8 +502,29 @@ function pageHome(body) {
       el('div', { class: 'caption' }, 'live · one websocket')),
     el('div', { class: 'summary-list', id: 'summary-list' }),
     el('div', { class: 'field-hint' }, 'The preview keeps streaming while you move between these pages — one socket, never renegotiated.'),
+    el('div', { style: 'height:1px;background:var(--color-divider)' }),
+    el('div', {}, el('div', { class: 'section-title' }, 'Mode'), el('div', { id: 'mode-wrap' })),
   ));
   renderSummaryRows();
+  renderModeSwitch();
+}
+function renderModeSwitch() {
+  const wrap = $('#mode-wrap');
+  if (!wrap) return;
+  wrap.innerHTML = '';
+  wrap.style.cssText = 'display:flex;flex-direction:column;gap:8px';
+  const modes = [
+    ['ambilight', 'Follow the TV', 'Colour comes from what is on screen'],
+    ['preset', 'Hold a WLED preset', 'Leaves the strip on whatever WLED is doing'],
+    ['off', 'Off', 'Nothing is sent to the controller'],
+  ];
+  for (const [id, label, hint] of modes) {
+    wrap.append(el('button', {
+      class: 'option-btn' + (cfg.mode === id ? ' active' : ''),
+      onclick: () => { set('mode', id, true); renderPage(); renderSimple(); },
+    }, el('span', { class: 'dot' }), el('span', { class: 'label' },
+      el('span', { class: 'name' }, label), el('span', { class: 'hint' }, hint))));
+  }
 }
 function renderSummaryRows() {
   const list = $('#summary-list');
@@ -527,22 +548,7 @@ function renderSummaryRows() {
 /* -- Colour -- */
 
 function pageColour(body) {
-  const modes = [
-    ['ambilight', 'Follow the TV', 'Colour comes from what is on screen'],
-    ['preset', 'Hold a WLED preset', 'Leaves the strip on whatever WLED is doing'],
-    ['off', 'Off', 'Nothing is sent to the controller'],
-  ];
-  const modeWrap = el('div', { style: 'display:flex;flex-direction:column;gap:8px' });
-  for (const [id, label, hint] of modes) {
-    modeWrap.append(el('button', {
-      class: 'option-btn' + (cfg.mode === id ? ' active' : ''),
-      onclick: () => { set('mode', id, true); renderPage(); renderSimple(); },
-    }, el('span', { class: 'dot' }), el('span', { class: 'label' },
-      el('span', { class: 'name' }, label), el('span', { class: 'hint' }, hint))));
-  }
-
   const page1 = el('div', { class: 'page' },
-    el('div', {}, el('div', { class: 'section-title' }, 'Mode'), modeWrap),
     el('div', {},
       el('div', { class: 'field-title' }, el('span', { class: 'name' }, 'Colour strength'),
         el('span', { class: 'value', id: 'strength-label' })),
@@ -849,6 +855,7 @@ function pageOutput(body) {
       el('span', { class: 'body' }, el('span', { class: 'name' }, 'Reachable'), el('span', { class: 'meta', id: 'output-summary' }))),
     el('button', { class: 'cta-btn', onclick: () => confirmPush() }, 'Push segments to the controller'),
     el('div', { class: 'field-hint' }, 'One segment per side, front to back — so WLED\'s own effects line up with your ceiling. Overwrites the layout stored on the device.'),
+    el('div', { style: 'height:1px;background:var(--color-divider)' }),
   ));
   const hostInput = $('#wled-host');
   hostInput.addEventListener('change', () => {
@@ -857,6 +864,7 @@ function pageOutput(body) {
     targets[0] = Object.assign({}, targets[0], { host: hostInput.value.trim(), enabled: !!hostInput.value.trim(), pixel_count: cfg.led.count });
     set('output.targets', targets, true);
   });
+  pageFrameGeneration(body.querySelector('.page'));
   renderLive();
 }
 function confirmPush() {
@@ -871,16 +879,17 @@ function confirmPush() {
     });
 }
 
-/* -- Frame generation -- */
+/* -- Frame generation (part of the Output page) -- */
 
-function pageFrames(body) {
+function pageFrameGeneration(pageEl) {
   const poll = cfg.source.poll_hz;
   const mults = [];
   for (let k = 1; k * poll <= 120; k++) mults.push(k * poll);
   const cur = Math.max(0, mults.indexOf(cfg.frames.output_fps));
   const madeUp = Math.max(0, Math.round(cfg.frames.output_fps / poll) - 1);
 
-  body.append(el('div', { class: 'page' },
+  pageEl.append(
+    el('div', { class: 'section-title' }, 'Frame generation'),
     el('div', {},
       el('div', { class: 'field-title' }, el('span', { class: 'name' }, 'Frames sent to the strip'), el('span', { class: 'value' }, cfg.frames.output_fps + ' fps')),
       el('div', { class: 'field-hint' }, madeUp === 0
@@ -900,7 +909,7 @@ function pageFrames(body) {
     el('div', { class: 'callout' },
       el('svg', { width: '18', height: '18', viewBox: '0 0 24 24', fill: 'none', stroke: 'var(--color-accent)', 'stroke-width': '2.75', 'stroke-linecap': 'round' }),
       el('span', {}, "Turn WLED's own crossfade off while AmbiWled is streaming — two smoothing stages in a row turn the picture to mush.")),
-  ));
+  );
 
   const pct = mults.length > 1 ? Math.round((cur / (mults.length - 1)) * 100) : 0;
   wireSlider($('#fps-track'), $('#fps-thumb'), $('#fps-fill'), 32,
