@@ -64,11 +64,27 @@ class Layout:
         return bool(self.sides)
 
 
-def _interp_rows(n: int, positions: np.ndarray, refs: Sequence[int], zone_count: int) -> np.ndarray:
-    """Rows for one edge: pixel centres linearly interpolated between zone centres.
+def _interp_rows(
+    n: int, positions: np.ndarray, refs: Sequence[int], zone_count: int, blend: float = 1.0
+) -> np.ndarray:
+    """Rows for one edge: pixel centres blended from zone centres with a
+    triangular (tent) kernel whose half-width is `blend` zone-spacings.
 
-    Outside the first/last zone centre the end colour is held (clamped); callers
-    add virtual neighbour zones beforehand when corner blending is on.
+    `blend=1.0` is a plain 2-tap linear interpolation between the nearest
+    zone on each side of a pixel - the original scheme, and still the
+    default: at exactly one zone-spacing away, a neighbour's weight has
+    fallen to exactly zero, so only the two bracketing zones ever
+    contribute, with the classic `(1-t, t)` split. `blend` toward 0 narrows
+    the kernel until neighbouring zones stop overlapping at all - each
+    pixel then takes its single nearest zone verbatim, the raw, blocky
+    zones as the TV actually sent them. `blend` above 1 widens the kernel,
+    pulling in zones beyond the immediate neighbours for a softer blend
+    than a hard 2-tap scheme can produce.
+
+    Outside the first/last zone centre the end colour is held (clamped);
+    callers add virtual neighbour zones beforehand when corner blending is
+    on - which then also respects `blend`, unchanged, since they are just
+    more positions in the same array.
     """
     rows = np.zeros((n, zone_count), dtype=np.float32)
     if n <= 0 or not len(refs):
@@ -78,15 +94,38 @@ def _interp_rows(n: int, positions: np.ndarray, refs: Sequence[int], zone_count:
         rows[:, ref_arr[0]] = 1.0
         return rows
 
-    x = np.arange(n, dtype=np.float64) + 0.5
-    seg = np.clip(np.searchsorted(positions, x) - 1, 0, len(positions) - 2)
-    p0 = positions[seg]
-    p1 = positions[seg + 1]
-    t = np.clip((x - p0) / np.maximum(p1 - p0, 1e-9), 0.0, 1.0)
+    positions = np.asarray(positions, dtype=np.float64)
+    # Positions are always regularly spaced (real zone centres, plus any
+    # virtual corner-blend neighbours at the same spacing), so the smallest
+    # gap is *the* spacing regardless of how many zones this edge has.
+    step = float(np.min(np.diff(positions)))
+    width = max(blend, 0.0) * step
 
-    idx = np.arange(n, dtype=np.intp)
-    np.add.at(rows, (idx, ref_arr[seg]), (1.0 - t).astype(np.float32))
-    np.add.at(rows, (idx, ref_arr[seg + 1]), t.astype(np.float32))
+    x = np.arange(n, dtype=np.float64) + 0.5
+    dist = np.abs(x[:, None] - positions[None, :])  # (n, z)
+
+    if width <= 1e-9:
+        # Degenerate: nearest zone only, hard edges - the "blocky" extreme.
+        nearest = np.argmin(dist, axis=1)
+        rows[np.arange(n), ref_arr[nearest]] = 1.0
+        return rows
+
+    w = np.clip(1.0 - dist / width, 0.0, None)
+    total = w.sum(axis=1)
+    starved = total <= 1e-9
+    if starved.any():
+        # The kernel is narrower than the gap to the nearest zone for some
+        # pixels (a small `blend`, few zones): fall back to that zone alone
+        # rather than divide by zero and leave the pixel unlit.
+        idx = np.where(starved)[0]
+        nearest = np.argmin(dist[idx], axis=1)
+        w[idx] = 0.0
+        w[idx, nearest] = 1.0
+        total = w.sum(axis=1)
+
+    w = (w / total[:, None]).astype(np.float32)
+    for k in range(len(ref_arr)):
+        rows[:, ref_arr[k]] += w[:, k]
     return rows
 
 
@@ -106,6 +145,14 @@ class Mapper:
 
         Empty for edges with no real source.  `synth_gradient` reports its two
         endpoints so neighbouring edges can still blend into it.
+
+        For a real physical side, `reversed` flips the order *here* — before
+        corner blending — rather than after building the rows.  A neighbour's
+        corner blend reads this edge's own zone order via `refs_by_edge`, so a
+        flip has to be visible at this point or the blended pixel at the join
+        ends up on the wrong physical corner.  See `build()` for the other
+        edge kinds, where there is no corner blend to keep in step and the
+        flip is applied to the finished rows instead.
         """
         src = edge.get("source")
         if src == "synth_gradient":
@@ -118,7 +165,7 @@ class Mapper:
         if off is None:
             return []
         refs = list(range(off, off + layout.count(src)))
-        if edge.get("source_reversed"):
+        if edge.get("reversed"):
             refs.reverse()
         return refs
 
@@ -147,6 +194,7 @@ class Mapper:
             return None
 
         corner_blend = bool(cfg["mapping"].get("corner_blend", True))
+        zone_blend = float(cfg["mapping"].get("zone_blend", 1.0))
         edges = sorted(cfg["mapping"]["edges"], key=lambda e: int(e["pixel_start"]))
         refs_by_edge = [self._edge_refs(e, layout) for e in edges]
 
@@ -166,10 +214,14 @@ class Mapper:
                 deferred.append((i, edge))
                 continue
 
-            rows = self._build_edge(edge, refs_by_edge, i, layout, corner_blend, zone_count)
+            rows = self._build_edge(edge, refs_by_edge, i, layout, corner_blend, zone_count, zone_blend)
             if rows is None:
                 continue
-            if edge.get("output_reversed"):
+            # Direct sides already had `reversed` applied to their zone order
+            # in _edge_refs, ahead of corner blending. Every other kind has no
+            # blend to stay consistent with, so it is simplest to flip the
+            # finished rows here instead.
+            if edge.get("reversed") and src not in layout.names:
                 rows = rows[::-1]
             matrix[start : start + n] = rows
             built[str(edge.get("name"))] = rows
@@ -185,7 +237,7 @@ class Mapper:
                 )
                 continue
             rows = _resample_rows(source_rows, n)[::-1]  # mirrored = copied, reversed
-            if edge.get("output_reversed"):
+            if edge.get("reversed"):
                 rows = rows[::-1]
             matrix[start : start + n] = rows
 
@@ -200,6 +252,7 @@ class Mapper:
         layout: Layout,
         corner_blend: bool,
         zone_count: int,
+        zone_blend: float = 1.0,
     ) -> np.ndarray | None:
         src = edge.get("source")
         n = int(edge["pixel_count"])
@@ -247,7 +300,7 @@ class Mapper:
                 refs.append(next_refs[0])
                 positions.append(positions[-1] + step)
 
-        return _interp_rows(n, np.asarray(positions, dtype=np.float64), refs, zone_count)
+        return _interp_rows(n, np.asarray(positions, dtype=np.float64), refs, zone_count, zone_blend)
 
 
 def _resample_rows(rows: np.ndarray, n: int) -> np.ndarray:

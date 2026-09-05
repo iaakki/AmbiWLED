@@ -1,3 +1,7 @@
 -r requirements.txt
 pytest>=8
 pytest-asyncio>=0.23
+# Drives the browser-only tests in test_ui.py (see the `browser` fixture in
+# conftest.py). Installing this package needs no browser itself; those
+# tests skip themselves if Firefox/geckodriver aren't also on the machine.
+selenium>=4

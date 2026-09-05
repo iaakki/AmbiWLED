@@ -19,7 +19,7 @@ CONFIG_PATH = CONFIG_DIR / "config.json"
 SYNTH_SOURCES = ("synth_gradient", "mirror_top", "average", "off")
 
 DEFAULT_CONFIG: dict[str, Any] = {
-    "version": 1,
+    "version": 2,
     "log_level": "INFO",
     # Whether we drive the strip at all.  `off` stops sending, which lets the
     # controller's realtime timeout hand the ceiling back to its own preset.
@@ -48,44 +48,53 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "mapping": {
         "corner_blend": True,
+        # How far each pixel's colour is drawn from the TV's own zones: 1.0
+        # is a plain interpolation between the two nearest zones (unchanged
+        # from before this existed). Below 1.0 narrows that toward showing
+        # each zone as a hard, blocky block - the TV's raw zones, exactly as
+        # sent. Above 1.0 widens it into a softer blend across more zones.
+        "zone_blend": 1.0,
+        # Four canonical slots - front/left/right/back - is the model the
+        # setup wizard and the UI's "which sides have strip" step both work
+        # in. 1-4 may be present; a fresh install ships all four.
         "edges": [
             {
-                "name": "tv_wall",
+                "name": "front",
                 "pixel_start": 0,
                 "pixel_count": 133,
                 "source": "top",
-                "source_reversed": False,
-                "output_reversed": False,
+                "reversed": False,
                 "brightness": 1.0,
             },
             {
-                "name": "right_side",
+                "name": "left",
                 "pixel_start": 133,
                 "pixel_count": 98,
-                "source": "right",
-                "source_reversed": False,
-                "output_reversed": False,
+                "source": "left",
+                "reversed": False,
                 "brightness": 1.0,
             },
             {
-                "name": "rear",
+                "name": "right",
                 "pixel_start": 231,
+                "pixel_count": 98,
+                "source": "right",
+                "reversed": False,
+                "brightness": 1.0,
+            },
+            {
+                "name": "back",
+                "pixel_start": 329,
                 "pixel_count": 133,
+                # synth_gradient, not mirror_top: it still contributes real
+                # zone references to its neighbours' corner blending, so the
+                # front/left and front/right seams stay smooth by default.
+                # mirror_top is a fine choice too, just a sharper-edged one.
                 "source": "synth_gradient",
                 "synth_from": ["right", -1],
                 "synth_to": ["left", 0],
-                "mirror_of": "tv_wall",
-                "source_reversed": False,
-                "output_reversed": False,
-                "brightness": 1.0,
-            },
-            {
-                "name": "left_side",
-                "pixel_start": 364,
-                "pixel_count": 98,
-                "source": "left",
-                "source_reversed": False,
-                "output_reversed": False,
+                "mirror_of": "front",
+                "reversed": False,
                 "brightness": 1.0,
             },
         ],
@@ -104,20 +113,17 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "enabled": False,
         "latitude": 0.0,            # set from the UI: "Use my location" or paste coordinates
         "longitude": 0.0,
+        # A parabola peaking at solar noon, meeting night_level exactly at
+        # sunrise and sunset. No schedule, no offsets - just these two levels
+        # and where you are.
         "day_level": 1.0,
         "night_level": 0.4,
-        # Shape of the daytime curve: 1.0 = parabola peaking at solar noon,
-        # >1 narrows the midday peak, <1 broadens it toward a plateau.
-        "curve_exponent": 1.0,
-        "sunrise_offset_minutes": 0.0,
-        "sunset_offset_minutes": 0.0,
     },
     "frames": {
-        "mode": "smoothing",          # smoothing | interpolation | passthrough
+        # Real TV samples arrive at source.poll_hz; this is how often the
+        # strip gets an update. Interpolated linearly between the last two
+        # real samples, so equal to poll_hz means no interpolation at all.
         "output_fps": 60.0,
-        "tau_ms": 80.0,
-        "adaptive_alpha": True,
-        "cut_threshold": 100.0,
     },
     "output": {
         "timeout_s": 2,
@@ -249,6 +255,9 @@ def validate(cfg: dict[str, Any]) -> list[str]:
     if led_count <= 0:
         errors.append("led.count must be greater than zero")
 
+    if not (0.0 <= float(cfg.get("mapping", {}).get("zone_blend", 1.0)) <= 4.0):
+        errors.append("mapping.zone_blend must be between 0 and 4")
+
     edges = cfg.get("mapping", {}).get("edges")
     if not isinstance(edges, list) or not edges:
         errors.append("mapping.edges must be a non-empty list")
@@ -309,15 +318,6 @@ def validate(cfg: dict[str, Any]) -> list[str]:
     if total != led_count:
         errors.append(f"edge pixel counts total {total}, but led.count is {led_count}")
 
-    # Frames / colour sanity.
-    f = cfg.get("frames", {})
-    if f.get("mode") not in ("smoothing", "interpolation", "passthrough"):
-        errors.append("frames.mode must be smoothing, interpolation or passthrough")
-    if not (1 <= float(f.get("output_fps", 60)) <= 240):
-        errors.append("frames.output_fps must be between 1 and 240")
-    if float(f.get("tau_ms", 80)) <= 0:
-        errors.append("frames.tau_ms must be greater than zero")
-
     s = cfg.get("source", {})
     tv_ip = str(s.get("tv_ip", "") or "").strip()
     if tv_ip and not _is_host(tv_ip):
@@ -331,6 +331,19 @@ def validate(cfg: dict[str, Any]) -> list[str]:
     if s.get("endpoint") not in ("processed", "measured"):
         errors.append("source.endpoint must be processed or measured")
 
+    # Frame generation: an output rate, not a smoothing amount. It must be
+    # able to interpolate evenly between real samples, so it is a whole
+    # multiple of the poll rate; equal to it means passthrough.
+    poll_hz = float(s.get("poll_hz", 20.0))
+    f = cfg.get("frames", {})
+    out_fps = float(f.get("output_fps", 60.0))
+    if not (poll_hz <= out_fps <= 120):
+        errors.append("frames.output_fps must be between source.poll_hz and 120")
+    else:
+        ratio = out_fps / poll_hz
+        if abs(ratio - round(ratio)) > 1e-6:
+            errors.append("frames.output_fps must be a whole multiple of source.poll_hz")
+
     d = cfg.get("dimming", {})
     if not (-90.0 <= float(d.get("latitude", 0)) <= 90.0):
         errors.append("dimming.latitude must be between -90 and 90")
@@ -339,8 +352,6 @@ def validate(cfg: dict[str, Any]) -> list[str]:
     for key in ("day_level", "night_level"):
         if not (0.0 <= float(d.get(key, 1.0)) <= 1.0):
             errors.append(f"dimming.{key} must be between 0 and 1")
-    if not (0.05 <= float(d.get("curve_exponent", 1.0)) <= 8.0):
-        errors.append("dimming.curve_exponent must be between 0.05 and 8")
 
     if cfg.get("mode") not in ("ambilight", "preset", "off"):
         errors.append("mode must be ambilight, preset or off")

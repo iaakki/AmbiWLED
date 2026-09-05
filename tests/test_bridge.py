@@ -19,7 +19,7 @@ def bridge_cfg(tv, sink_host, sink_port):
                           "request_timeout_s": 1.0})
     cfg["output"]["targets"] = [{"host": sink_host, "port": sink_port,
                                  "pixel_offset": 0, "pixel_count": 462, "enabled": True}]
-    cfg["frames"].update({"mode": "passthrough", "output_fps": 60.0})
+    cfg["frames"].update({"output_fps": 60.0})
     return cfg
 
 
@@ -64,13 +64,13 @@ async def test_mapping_matches_the_source_zones(wired):
     await _wait_for(lambda: bridge.last_frame[60].argmax() == 1, timeout=5)
 
     f = bridge.last_frame
-    assert f[60].argmax() == 1, "middle of the TV wall should come from top (green)"
-    assert f[180].argmax() == 2, "middle of the right run should come from right (blue)"
-    assert f[420].argmax() == 0, "middle of the left run should come from left (red)"
-    # The synthesised rear blends the two bottom corners: red and blue, no green.
-    rear = f[231:364]
-    assert rear[:, 1].max() < 40
-    assert rear[0].argmax() == 2 and rear[-1].argmax() == 0
+    assert f[60].argmax() == 1, "middle of the front run should come from top (green)"
+    assert f[182].argmax() == 0, "middle of the left run should come from left (red)"
+    assert f[280].argmax() == 2, "middle of the right run should come from right (blue)"
+    # The synthesised back blends the two bottom corners: blue to red, no green.
+    back = f[329:462]
+    assert back[:, 1].max() < 40
+    assert back[0].argmax() == 2 and back[-1].argmax() == 0
 
 
 async def test_emission_stops_when_the_tv_goes_off(wired):
@@ -128,6 +128,83 @@ async def test_identify_overrides_the_stream_then_releases_it(wired):
     assert bridge.last_frame[200].any() or bridge.poller.state != "streaming"
 
 
+# -- dimming: a config change must reach the strip immediately -------------
+
+def test_apply_config_updates_auto_level_immediately():
+    """The output loop only re-samples the dimming schedule every 20s - fine
+    for the sun moving, not for a config change. Disabling auto-dim (or
+    changing night/day level) must snap the real output straight away,
+    not leave it showing whatever the schedule said up to 20s ago."""
+    bridge = Bridge(config_mod.default_config())
+    bridge.colour.auto_level = 0.18  # simulate having settled on a dim night level
+
+    cfg = config_mod.default_config()
+    cfg["dimming"]["enabled"] = False   # disabled always means 1.0, no clock/location needed
+    bridge.apply_config(cfg)
+
+    assert bridge.colour.auto_level == 1.0
+
+
+# -- identify: a moving comet, so a flipped edge is visible on the real strip -
+
+def test_identify_by_name_lights_only_part_of_its_own_edge(monkeypatch):
+    """A comet, not a solid fill - and it must never spill past the edge's
+    own pixel range into whatever is next to it."""
+    import time as time_mod
+    bridge = Bridge(config_mod.default_config())
+    bridge.identify(edge="front", seconds=5.0)         # front: pixels 0..132
+    monkeypatch.setattr(time_mod, "monotonic", lambda: 1000.2)
+    frame = bridge._identify_frame()
+    lit = np.where(frame.any(axis=1))[0]
+    assert len(lit) > 0
+    assert lit.min() >= 0 and lit.max() < 133
+    assert len(lit) < 133
+
+
+def test_identify_chase_moves_over_time(monkeypatch):
+    import time as time_mod
+    bridge = Bridge(config_mod.default_config())
+    bridge.identify(edge="front", seconds=5.0)
+    monkeypatch.setattr(time_mod, "monotonic", lambda: 1000.0)
+    frame_a = bridge._identify_frame()
+    monkeypatch.setattr(time_mod, "monotonic", lambda: 1000.8)
+    frame_b = bridge._identify_frame()
+    assert not np.allclose(frame_a, frame_b)
+
+
+def test_identify_chase_direction_follows_reversed(monkeypatch):
+    """The whole point: flipping `reversed` must flip which way the comet
+    runs, so pressing Identify after tapping Flip is the confirmation."""
+    import time as time_mod
+
+    def make(is_reversed):
+        cfg = config_mod.default_config()
+        for e in cfg["mapping"]["edges"]:
+            if e["name"] == "front":
+                e["reversed"] = is_reversed
+        b = Bridge(cfg)
+        b.identify(edge="front", seconds=5.0)
+        return b
+
+    forward, backward = make(False), make(True)
+    monkeypatch.setattr(time_mod, "monotonic", lambda: 1000.1)  # early in the cycle
+    f_head = int(np.argmax(forward._identify_frame().sum(axis=1)))
+    b_head = int(np.argmax(backward._identify_frame().sum(axis=1)))
+    assert f_head < 133 // 2, "not reversed: early in the cycle, near the start"
+    assert b_head > 133 // 2, "reversed: early in the cycle, near the end"
+
+
+def test_identify_by_range_is_still_a_plain_fill():
+    """The span form (identifying an edge still being edited, before it has
+    a saved `reversed` to check) is unaffected - no direction to show yet."""
+    bridge = Bridge(config_mod.default_config())
+    bridge.identify(span=(10, 20), seconds=5.0)
+    frame = bridge._identify_frame()
+    block = frame[10:30]
+    assert block.min() > 0
+    assert block.min() == block.max()
+
+
 async def test_metrics_report_reality(wired):
     bridge, tv, recv = wired
     await _wait_for(lambda: bridge.poller.state == "streaming")
@@ -141,19 +218,49 @@ async def test_metrics_report_reality(wired):
     assert m["send_errors"] == 0
 
 
+# -- process/host resource diagnostics ---------------------------------------
+
+def test_cpu_count_reports_the_actual_affinity_not_just_the_host_total():
+    """A cgroup CPU-set limit, if any, is what "how many cores do I have"
+    should answer - os.cpu_count() ignores that and reports the host."""
+    assert Bridge._cpu_count() >= 1
+
+
+def test_proc_cpu_seconds_only_ever_goes_up():
+    a = Bridge._proc_cpu_seconds()
+    for _ in range(300000):
+        pass  # burn a little real CPU so utime has something to record
+    b = Bridge._proc_cpu_seconds()
+    assert b >= a
+
+
+async def test_metrics_report_cpu_and_load(wired):
+    """Resampled within the output loop, not a lifetime average - a real
+    spike should be visible within a couple of seconds, not smoothed away
+    by everything that ran before it."""
+    bridge, tv, recv = wired
+    await _wait_for(lambda: bridge.poller.state == "streaming")
+    await asyncio.sleep(2.3)  # past the 2s resample window
+
+    m = bridge.metrics()
+    assert m["cpu_percent"] >= 0.0
+    assert m["cpu_count"] >= 1
+    assert len(m["load_avg"]) == 3
+
+
 # -- per-edge brightness trim -------------------------------------------------
 
 def edges_for(brightness_by_name: dict[str, float]) -> list[dict]:
     edges = [
-        {"name": "tv_wall", "pixel_start": 0, "pixel_count": 133, "source": "top",
-         "source_reversed": False, "output_reversed": False},
-        {"name": "right_side", "pixel_start": 133, "pixel_count": 98, "source": "right",
-         "source_reversed": False, "output_reversed": False},
-        {"name": "rear", "pixel_start": 231, "pixel_count": 133, "source": "synth_gradient",
+        {"name": "front", "pixel_start": 0, "pixel_count": 133, "source": "top",
+         "reversed": False},
+        {"name": "left", "pixel_start": 133, "pixel_count": 98, "source": "left",
+         "reversed": False},
+        {"name": "right", "pixel_start": 231, "pixel_count": 98, "source": "right",
+         "reversed": False},
+        {"name": "back", "pixel_start": 329, "pixel_count": 133, "source": "synth_gradient",
          "synth_from": ["right", -1], "synth_to": ["left", 0],
-         "source_reversed": False, "output_reversed": False},
-        {"name": "left_side", "pixel_start": 364, "pixel_count": 98, "source": "left",
-         "source_reversed": False, "output_reversed": False},
+         "reversed": False},
     ]
     for e in edges:
         e["brightness"] = brightness_by_name.get(e["name"], 1.0)
@@ -171,13 +278,13 @@ async def test_dimming_the_rear_edge_only_affects_those_pixels(wired):
     cfg["source"] = bridge.cfg["source"]
     cfg["output"] = bridge.cfg["output"]
     cfg["frames"] = dict(bridge.cfg["frames"])
-    cfg["mapping"]["edges"] = edges_for({"rear": 0.3})
+    cfg["mapping"]["edges"] = edges_for({"back": 0.3})
     bridge.apply_config(cfg)
 
     assert bridge.edge_scale is not None
-    assert np.allclose(bridge.edge_scale[0:133], 1.0)      # tv_wall
-    assert np.allclose(bridge.edge_scale[231:364], 0.3)    # rear
-    assert np.allclose(bridge.edge_scale[364:462], 1.0)    # left_side
+    assert np.allclose(bridge.edge_scale[0:133], 1.0)      # front
+    assert np.allclose(bridge.edge_scale[329:462], 0.3)    # back
+    assert np.allclose(bridge.edge_scale[133:231], 1.0)    # left
 
 
 async def test_the_trim_actually_dims_the_streamed_frame(wired):
@@ -187,11 +294,11 @@ async def test_the_trim_actually_dims_the_streamed_frame(wired):
     cfg["source"] = bridge.cfg["source"]
     cfg["output"] = bridge.cfg["output"]
     cfg["frames"] = dict(bridge.cfg["frames"])
-    cfg["mapping"]["edges"] = edges_for({"rear": 0.25})
+    cfg["mapping"]["edges"] = edges_for({"back": 0.25})
     bridge.apply_config(cfg)
 
     await _wait_for(lambda: bridge.last_frame[50].max() > 100, timeout=6)
-    front = int(bridge.last_frame[50].max())     # tv_wall: undimmed
-    rear = int(bridge.last_frame[300].max())     # rear: dimmed to 25%
+    front = int(bridge.last_frame[50].max())      # front: undimmed
+    rear = int(bridge.last_frame[400].max())      # back: dimmed to 25%
     assert front > 150
     assert 0 < rear < front // 2

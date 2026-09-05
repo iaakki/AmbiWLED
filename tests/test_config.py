@@ -17,7 +17,7 @@ def test_defaults_are_valid(cfg):
 
 
 def test_overlap_is_rejected(cfg):
-    cfg["mapping"]["edges"][1]["pixel_start"] = 100   # tv_wall runs to 132
+    cfg["mapping"]["edges"][1]["pixel_start"] = 100   # front runs to 132
     assert errors_for(cfg, "overlaps")
 
 
@@ -77,14 +77,30 @@ def test_timeout_255_is_rejected(cfg):
     assert not errors_for(cfg, "timeout_s")
 
 
-@pytest.mark.parametrize("field,value,needle", [
-    ("mode", "magic", "frames.mode"),
-    ("output_fps", 500, "output_fps"),
-    ("tau_ms", 0, "tau_ms"),
+@pytest.mark.parametrize("value,needle", [
+    (500, "output_fps"),               # past the 120 cap
+    (0, "output_fps"),                 # below the poll rate
+    (45, "whole multiple"),            # 45 fps out of a 20 fps source: not a multiple
 ])
-def test_frame_settings_are_bounded(cfg, field, value, needle):
-    cfg["frames"][field] = value
+def test_frame_settings_are_bounded(cfg, value, needle):
+    cfg["frames"]["output_fps"] = value
     assert errors_for(cfg, needle)
+
+
+def test_output_fps_equal_to_poll_rate_is_valid():
+    """Equal means "no interpolation" - a valid, common choice, not an edge case."""
+    cfg = config_mod.default_config()
+    cfg["frames"]["output_fps"] = cfg["source"]["poll_hz"]
+    assert config_mod.validate(cfg) == []
+
+
+def test_output_fps_must_be_a_whole_multiple_of_the_poll_rate():
+    cfg = config_mod.default_config()
+    cfg["source"]["poll_hz"] = 20.0
+    cfg["frames"]["output_fps"] = 90.0     # not a multiple of 20
+    assert errors_for(cfg, "whole multiple")
+    cfg["frames"]["output_fps"] = 80.0     # 4x
+    assert config_mod.validate(cfg) == []
 
 
 @pytest.mark.parametrize("field,value", [("poll_hz", 100), ("api_version", 3), ("endpoint", "raw")])
@@ -127,7 +143,7 @@ def test_missing_keys_are_filled_from_defaults():
     """An old config file must not lose new settings."""
     merged = config_mod.merge_defaults({"led": {"count": 300}})
     assert merged["led"]["count"] == 300
-    assert merged["frames"]["mode"] == "smoothing"
+    assert merged["frames"]["output_fps"] == 60.0
     assert merged["output"]["timeout_s"] == 2
 
 

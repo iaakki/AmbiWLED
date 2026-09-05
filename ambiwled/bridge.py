@@ -4,6 +4,8 @@ from __future__ import annotations
 import asyncio
 import copy
 import logging
+import os
+import resource
 import time
 from collections import deque
 from typing import Any
@@ -53,6 +55,14 @@ class Bridge:
         self.edge_scale: np.ndarray | None = None
         self.output_fps_actual = 0.0
         self._dim_checked = 0.0
+        # A resampled percentage, not a lifetime average - CPU spikes (a
+        # scene cut driving adaptive alpha hard, an identify chase) show up
+        # within a couple of seconds instead of being smoothed away by
+        # everything that came before.
+        self.cpu_percent = 0.0
+        self._cpu_checked = 0.0
+        self._cpu_last_wall = time.monotonic()
+        self._cpu_last_proc = self._proc_cpu_seconds()
         self._emitting_since: float | None = None
         # Preset-mode arbiter: retries a selection until confirmed, so it
         # works whether the controller accepts it immediately or only once
@@ -257,6 +267,13 @@ class Bridge:
         self.health.update(cfg)
         self.mqtt.update(cfg)
         self.poller.update(cfg)
+        # The output loop only re-samples the dimming schedule every 20s -
+        # fine for the sun moving, wrong for a config change. Night level,
+        # day level, and the enabled switch itself all take visible
+        # brightness with them; nothing about this change should wait up to
+        # 20s to reach the strip.
+        self.colour.auto_level = self.dimming.level()
+        self._dim_checked = time.monotonic()
         self._dirty = True
         self._rebuild()
 
@@ -280,6 +297,15 @@ class Bridge:
         self.identify_colour = colour
         self.identify_until = time.monotonic() + seconds if (edge or span) else 0.0
 
+    # A moving comet, not a static fill: the whole point of identifying a
+    # named edge is checking that the direction it appears to run in on the
+    # real strip matches what `reversed` tells the rest of the pipeline -
+    # exactly the thing a solid colour cannot show. The span form (used
+    # while an edge is still being edited, before it has a name to look up)
+    # has no `reversed` of its own to check, so it stays a plain fill.
+    _CHASE_PERIOD_S = 1.6
+    _CHASE_WIDTH_PX = 4.0
+
     def _identify_frame(self) -> np.ndarray | None:
         active = self.identify_edge or self.identify_span
         if not active or time.monotonic() > self.identify_until:
@@ -298,26 +324,46 @@ class Bridge:
         for e in self.cfg["mapping"]["edges"]:
             if e.get("name") == self.identify_edge:
                 start = int(e["pixel_start"])
-                end = min(start + int(e["pixel_count"]), self.led_count)
-                frame[start:end] = self.identify_colour
+                n = min(int(e["pixel_count"]), self.led_count - start)
+                if n > 0:
+                    self._paint_chase(frame, start, n, bool(e.get("reversed")))
                 return frame
         return frame
+
+    def _paint_chase(self, frame: np.ndarray, start: int, n: int, reversed_: bool) -> None:
+        """A short comet sweeping the edge's own pixel order - ascending
+        unless `reversed`, so flipping that field visibly flips which way
+        the comet runs the next time Identify is pressed."""
+        t = (time.monotonic() % self._CHASE_PERIOD_S) / self._CHASE_PERIOD_S
+        if reversed_:
+            t = 1.0 - t
+        head = t * n
+        idx = np.arange(n, dtype=np.float32)
+        dist = np.abs(idx - head)
+        dist = np.minimum(dist, n - dist)  # wrap, so the tail doesn't clip at the loop point
+        intensity = np.clip(1.0 - dist / self._CHASE_WIDTH_PX, 0.0, 1.0) ** 1.5
+        colour = np.asarray(self.identify_colour, dtype=np.float32)
+        frame[start : start + n] = intensity[:, None] * colour
 
     # -- output loop -----------------------------------------------------
 
     async def _output_loop(self) -> None:
-        last = time.monotonic()
-        next_tick = last
+        next_tick = time.monotonic()
         while True:
             fps = max(float(self.cfg["frames"].get("output_fps", 60.0)), 1.0)
             period = 1.0 / fps
             now = time.monotonic()
-            dt = max(now - last, 1e-4)
-            last = now
 
             if now - self._dim_checked > 20.0:
                 self._dim_checked = now
                 self.colour.auto_level = self.dimming.level()
+
+            if now - self._cpu_checked > 2.0:
+                proc_now = self._proc_cpu_seconds()
+                wall_dt = now - self._cpu_last_wall
+                if wall_dt > 0:
+                    self.cpu_percent = round(100.0 * (proc_now - self._cpu_last_proc) / wall_dt, 1)
+                self._cpu_last_wall, self._cpu_last_proc, self._cpu_checked = now, proc_now, now
 
             if (self._preset_target is not None and not self._preset_applied
                     and not self._preset_pending and now - self._preset_last_attempt > 2.0):
@@ -329,7 +375,7 @@ class Bridge:
                 frame = ident
                 emit = True
             else:
-                frame = self.engine.tick(dt, now)
+                frame = self.engine.tick(now)
                 emit = self.should_emit()
 
             self.last_frame = np.clip(frame + 0.5, 0, 255).astype(np.uint8)
@@ -387,7 +433,28 @@ class Bridge:
             "brightness_applied": round(self.colour.effective_brightness, 4),
             "dimming": self.dimming.describe(),
             "source_interval_ms": round(self.engine.source_interval * 1000.0, 1),
+            "cpu_percent": self.cpu_percent,
+            "cpu_count": self._cpu_count(),
+            # The host's load average, not a per-container figure - cgroups
+            # don't get their own; still the honest answer to "how busy is
+            # the machine this is running on".
+            "load_avg": os.getloadavg(),
         }
+
+    @staticmethod
+    def _proc_cpu_seconds() -> float:
+        r = resource.getrusage(resource.RUSAGE_SELF)
+        return r.ru_utime + r.ru_stime
+
+    @staticmethod
+    def _cpu_count() -> int:
+        # Reflects a cgroup CPU-set limit if one is applied to the
+        # container; os.cpu_count() would report the host's full count
+        # regardless, which is misleading for "how many cores do I have".
+        try:
+            return len(os.sched_getaffinity(0))
+        except AttributeError:
+            return os.cpu_count() or 1
 
     def preview(self) -> list[int]:
         return self.last_frame.reshape(-1).tolist()

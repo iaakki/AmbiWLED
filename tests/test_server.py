@@ -12,23 +12,8 @@ from ambiwled import config as config_mod
 from ambiwled.bridge import Bridge
 from ambiwled.server import Server
 
-
-@pytest.fixture
-async def running(tmp_config):
-    """A real Server on an ephemeral port.  The poller is never started, so no
-    TV is contacted; the output loop is not running either."""
-    cfg = config_mod.default_config()
-    cfg["web"] = {"host": "127.0.0.1", "port": 0, "preview_fps": 15.0}
-    config_mod.save(cfg)
-
-    bridge = Bridge(cfg)
-    server = Server(bridge)
-    runner = await server.start()
-    host, port = runner.addresses[0][:2]
-    base = f"http://{host}:{port}"
-    async with aiohttp.ClientSession() as session:
-        yield server, bridge, base, session, tmp_config
-    await server.stop(runner)
+# `running` (a real Server on an ephemeral port) lives in conftest.py now -
+# shared with tests/test_ui.py, which drives the same server with a browser.
 
 
 async def test_state_reports_config_and_validation(running):
@@ -67,10 +52,10 @@ async def test_patch_leaves_untouched_keys_alone(running):
     _, bridge, base, session, _ = running
     await session.put(f"{base}/api/config", json={"patch": {"source": {"tv_ip": "10.0.0.5"}}})
     async with session.put(f"{base}/api/config",
-                           json={"patch": {"frames": {"tau_ms": 200.0}}}) as r:
+                           json={"patch": {"frames": {"output_fps": 40.0}}}) as r:
         assert r.status == 200
     assert bridge.cfg["source"]["tv_ip"] == "10.0.0.5"    # survived the second patch
-    assert bridge.cfg["frames"]["tau_ms"] == 200.0
+    assert bridge.cfg["frames"]["output_fps"] == 40.0
 
 
 async def test_invalid_patch_is_rejected_and_changes_nothing(running):
@@ -135,13 +120,15 @@ async def test_identify_by_range_works_without_a_valid_config(running):
 
 
 async def test_identify_by_name_still_works(running):
+    """Routing only - the chase pattern itself is covered in test_bridge.py."""
     _, bridge, base, session, _ = running
     async with session.ws_connect(f"{base}/ws") as ws:
-        await ws.send_json({"type": "identify", "edge": "rear", "seconds": 5})
+        await ws.send_json({"type": "identify", "edge": "back", "seconds": 5})
         await asyncio.sleep(0.2)
     frame = bridge._identify_frame()
     lit = [i for i in range(462) if frame[i].any()]
-    assert lit[0] == 231 and lit[-1] == 363
+    assert lit, "identifying 'back' produced no light at all"
+    assert 329 <= lit[0] and lit[-1] <= 461, "must not spill outside back's own range"
 
 
 async def test_identify_expires(running):
@@ -202,7 +189,7 @@ async def test_segment_push_endpoint_reports_failure_without_a_controller(runnin
     assert data["ok"] is False
     assert data["results"][0]["ok"] is False
     # The derived segments are still returned, so the UI can show what it tried.
-    assert [s["n"] for s in data["segments"]] == ["tv_wall", "right_side", "rear", "left_side"]
+    assert [s["n"] for s in data["segments"]] == ["front", "left", "right", "back"]
 
 
 async def test_segment_push_needs_an_enabled_target(running):
@@ -332,4 +319,88 @@ async def test_resolve_link_reports_an_unreachable_host(running):
 async def test_resolve_link_rejects_malformed_json(running):
     _, _, base, session, _ = running
     async with session.post(f"{base}/api/resolve-link", data="{{{") as r:
+        assert r.status == 400
+
+
+# -- MQTT connection test (item 7) --------------------------------------------
+
+async def test_mqtt_test_reports_the_result_from_mqtt_mod(running, monkeypatch):
+    _, _, base, session, _ = running
+    monkeypatch.setattr("ambiwled.server.mqtt_mod.test_connection",
+                        lambda *a, **k: _resolved({"ok": False, "reason": "auth"}))
+    async with session.post(f"{base}/api/mqtt/test",
+                            json={"host": "192.0.2.30", "port": 1883,
+                                  "username": "u", "password": "wrong"}) as r:
+        assert r.status == 200
+        data = await r.json()
+    assert data == {"ok": False, "reason": "auth"}
+
+
+async def test_mqtt_test_rejects_a_bad_host_without_attempting_a_connection(running, monkeypatch):
+    _, _, base, session, _ = running
+    called = []
+    monkeypatch.setattr("ambiwled.server.mqtt_mod.test_connection",
+                        lambda *a, **k: called.append(1) or _resolved({"ok": True}))
+    async with session.post(f"{base}/api/mqtt/test",
+                            json={"host": "", "port": 1883}) as r:
+        data = await r.json()
+    assert data["ok"] is False
+    assert not called
+
+
+async def test_mqtt_test_falls_back_to_the_stored_password(running, monkeypatch):
+    """The wizard may be testing after only changing the host - it should not
+    have to know or resend an already-saved password."""
+    _, bridge, base, session, _ = running
+    bridge.cfg["mqtt"]["password"] = "already-stored"
+    seen = {}
+
+    def fake(host, port, username, password, **k):
+        seen["password"] = password
+        return _resolved({"ok": True})
+
+    monkeypatch.setattr("ambiwled.server.mqtt_mod.test_connection", fake)
+    async with session.post(f"{base}/api/mqtt/test",
+                            json={"host": "192.0.2.30", "port": 1883,
+                                  "username": "u", "password": config_mod.REDACTED}) as r:
+        assert r.status == 200
+    assert seen["password"] == "already-stored"
+
+
+def _resolved(value):
+    async def _coro():
+        return value
+    return _coro()
+
+
+# -- import (schema-versioned, item: "Export/Import settings are stubs") -----
+
+async def test_import_rejects_a_mismatched_schema_version(running):
+    _, bridge, base, session, _ = running
+    old = config_mod.default_config()
+    old["version"] = 1
+    async with session.post(f"{base}/api/config/import", json=old) as r:
+        assert r.status == 400
+        data = await r.json()
+    assert "version" in data["errors"][0]
+    assert bridge.cfg["version"] == config_mod.DEFAULT_CONFIG["version"]
+
+
+async def test_import_replaces_the_config_when_the_version_matches(running):
+    _, bridge, base, session, tmp_config = running
+    fresh = config_mod.default_config()
+    fresh["led"]["count"] = 100
+    fresh["mapping"]["edges"] = [
+        {"name": "only", "pixel_start": 0, "pixel_count": 100, "source": "top",
+         "reversed": False, "brightness": 1.0}
+    ]
+    async with session.post(f"{base}/api/config/import", json=fresh) as r:
+        assert r.status == 200
+    assert bridge.cfg["led"]["count"] == 100
+    assert len(bridge.cfg["mapping"]["edges"]) == 1
+
+
+async def test_import_rejects_malformed_json(running):
+    _, _, base, session, _ = running
+    async with session.post(f"{base}/api/config/import", data="not json") as r:
         assert r.status == 400

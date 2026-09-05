@@ -12,6 +12,10 @@ before changing the pixel path, the mapping model or the output protocol.
   reports success, verify the effect.
 - **Tests must not need hardware.** `make test` runs against a fake TV and a
   fake controller. Anything that needs a real device is a gap in the fakes.
+  `tests/test_ui.py` drives the real UI in a browser to catch bugs the HTTP
+  API alone can't see (stale DOM state, duplicated listeners, response-
+  ordering races) - it skips itself, rather than fails, if Firefox and
+  geckodriver aren't installed, so it stays within this rule everywhere else.
 - **The config is the single source of truth for geometry.** Segment layouts,
   offsets and pixel ranges are derived from `mapping.edges`, never hand-typed
   in two places.

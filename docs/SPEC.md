@@ -173,6 +173,20 @@ For an edge with `n` output pixels and `z` source zones:
 boundary makes corners continuous with no seam. Make this a boolean config option
 (`corner_blend`, default true) so it can be disabled for debugging.
 
+**Blend width (`mapping.zone_blend`, default 1.0):** step 2 above is really a
+triangular (tent) kernel whose half-width is one zone-spacing - `zone_blend`
+scales that width. At 1.0 it is exactly the plain 2-tap linear scheme described
+above. Below 1.0 the kernel narrows until neighbouring zones no longer overlap
+at all, at which point each pixel takes its single nearest zone verbatim - a
+user-visible option for people who find interpolation too smooth relative to
+what the TV actually sent (reported directly: with only ~11 zones across an
+edge, a moving on-screen object can look like it crosses in discrete blocky
+steps rather than smoothly, and that is a real property of having few zones,
+not a bug in the blend - the slider lets someone choose to see it plainly
+rather than have it smoothed over). Above 1.0 the kernel widens to pull in
+zones beyond the immediate neighbours, for a softer blend than a 2-tap scheme
+can produce. Range 0.0-4.0, exposed as a slider on the Colour page.
+
 ### 3.5 Rear edge synthesis
 
 The rear edge has no source. Default mode `synth_gradient`: a linear gradient from
