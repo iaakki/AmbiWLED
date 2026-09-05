@@ -81,6 +81,8 @@ async def request_pin(
     try:
         async with session.post(url, json=body, ssl=False, timeout=aiohttp.ClientTimeout(total=5)) as r:
             data = await r.json(content_type=None)
+    except TimeoutError as exc:
+        raise PairingError("could not reach the TV: timed out") from exc
     except aiohttp.ClientError as exc:
         raise PairingError(f"could not reach the TV: {exc}") from exc
     if not isinstance(data, dict) or data.get("error_id") != "SUCCESS":
@@ -175,6 +177,8 @@ async def grant_pin(
         )
     except aiohttp.ClientResponseError as exc:
         raise PairingError(f"the TV rejected pairing (HTTP {exc.status})") from exc
+    except TimeoutError as exc:
+        raise PairingError("could not reach the TV: timed out") from exc
     except aiohttp.ClientError as exc:
         raise PairingError(f"could not reach the TV: {exc}") from exc
     if not isinstance(data, dict) or data.get("error_id") != "SUCCESS":
@@ -196,7 +200,14 @@ async def get_screen_state(
             session, "GET", tv_ip, "screenstate", device_id, auth_key,
             port=port, timeout=timeout, scheme=scheme,
         )
-    except aiohttp.ClientError:
+    except Exception:
+        # Deliberately broad, not just aiohttp.ClientError: a real TV gone
+        # fully dark (deep standby, past Quick-Start's grace period) does
+        # not refuse the connection, it just never answers - confirmed
+        # live, that surfaces as a bare TimeoutError/asyncio.TimeoutError,
+        # not aiohttp.ClientError. Any failure here degrades to "unknown";
+        # this is a best-effort secondary check and must never take down
+        # the poll loop that calls it.
         return None
     if not isinstance(data, dict):
         return None

@@ -8,9 +8,11 @@ docstring); this pins it down so it can't regress silently.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import re
 
+import aiohttp
 import pytest
 from aiohttp import web
 
@@ -148,6 +150,38 @@ async def test_get_screen_state_is_none_when_never_paired(aiohttp_client_session
 
 
 async def test_get_screen_state_is_none_when_unreachable(aiohttp_client_session):
+    """Connection actively refused (nothing listening)."""
     state = await pairing.get_screen_state(
         aiohttp_client_session, "127.0.0.1", "d", "k", port=1, timeout=0.3, scheme="http")
     assert state is None
+
+
+async def test_get_screen_state_is_none_on_a_hung_connection():
+    """A TV in deep standby (past Quick-Start's grace period) doesn't
+    refuse the connection - it just never answers. That surfaces as a
+    bare TimeoutError, not aiohttp.ClientError - regression coverage for
+    exactly that gap: get_screen_state must still degrade to None, not
+    raise, and must not hang past its own timeout."""
+    connections = []
+
+    async def accept_and_never_respond(reader, writer):
+        connections.append(writer)  # keep it open; closed explicitly below
+
+    server = await asyncio.start_server(accept_and_never_respond, "127.0.0.1", 0)
+    host, port = server.sockets[0].getsockname()[:2]
+    try:
+        async with aiohttp.ClientSession() as session:
+            state = await asyncio.wait_for(
+                pairing.get_screen_state(session, host, "d", "k", port=port, timeout=0.3, scheme="http"),
+                timeout=3.0,
+            )
+        assert state is None
+    finally:
+        # asyncio.Server.wait_closed() (3.12+) blocks until every accepted
+        # connection is closed too, not just the listening socket - close
+        # the one(s) our own handler deliberately never touched, or the
+        # test's own cleanup hangs forever instead of pairing.py's code.
+        for w in connections:
+            w.close()
+        server.close()
+        await server.wait_closed()
