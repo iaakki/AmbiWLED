@@ -26,6 +26,12 @@ class FrameEngine:
         self.target_time: float | None = None
         self.prev_target_time: float | None = None
         self._intervals: deque[float] = deque(maxlen=30)
+        # Recomputed only when a new interval actually arrives (push()), not
+        # on every tick() - tick() runs at output_fps (up to 60Hz), push()
+        # at the source's own poll rate (typically 20-30Hz): recomputing a
+        # median that many extra times a second for a value that cannot
+        # have changed between two pushes was pure waste.
+        self.source_interval = 1.0 / 20.0
         self.update(cfg)
 
     # -- config ----------------------------------------------------------
@@ -51,6 +57,7 @@ class FrameEngine:
             self.resize(frame.shape[0])
         if self.target_time is not None:
             self._intervals.append(now - self.target_time)
+            self.source_interval = float(np.median(np.fromiter(self._intervals, dtype=np.float64)))
         self.prev_target = self.target
         self.prev_target_time = self.target_time
         self.target = frame.astype(np.float32, copy=False)
@@ -64,13 +71,7 @@ class FrameEngine:
         self.target_time = None
         self.prev_target_time = None
         self._intervals.clear()
-
-    @property
-    def source_interval(self) -> float:
-        """Rolling median of observed source arrival intervals."""
-        if not self._intervals:
-            return 1.0 / 20.0
-        return float(np.median(np.fromiter(self._intervals, dtype=np.float64)))
+        self.source_interval = 1.0 / 20.0
 
     # -- output ----------------------------------------------------------
 

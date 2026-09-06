@@ -27,6 +27,15 @@ from .source import SourcePoller
 
 log = logging.getLogger(__name__)
 
+# How often the output loop wakes up while there is nothing to emit (TV off,
+# mode off, controller unreachable): far below output_fps, since ticking a
+# frame interpolator and re-quantising a static/zero frame 60 times a second
+# for a strip that is receiving none of it is pure waste - and it is the
+# common case, not the rare one, for however many hours a day the TV is off.
+# Small enough that the worst case - the TV/controller becomes available
+# mid-idle-sleep - adds at most this much latency before the first real
+# frame goes out, on top of the source poller's own detection time.
+_IDLE_TICK_S = 0.1
 
 class Bridge:
     def __init__(self, cfg: dict[str, Any]) -> None:
@@ -382,21 +391,26 @@ class Bridge:
             if emit:
                 if self._emitting_since is None:
                     self._emitting_since = now
-                self.sender.send(frame)
+                self.sender.send(self.last_frame)
+                self._tick_times.append(now)
+                if len(self._tick_times) > 1:
+                    span = self._tick_times[-1] - self._tick_times[0]
+                    self.output_fps_actual = (len(self._tick_times) - 1) / span if span > 0 else 0.0
             else:
                 self._emitting_since = None
 
-            self._tick_times.append(now)
-            if len(self._tick_times) > 1:
-                span = self._tick_times[-1] - self._tick_times[0]
-                self.output_fps_actual = (len(self._tick_times) - 1) / span if span > 0 else 0.0
-
-            # Absolute schedule, so sleep overhead does not accumulate into drift.
-            next_tick += period
-            slack = next_tick - time.monotonic()
-            if slack < -period:
-                next_tick = time.monotonic() + period   # fell far behind, resync
-                slack = period
+            # Absolute schedule, so sleep overhead does not accumulate into drift -
+            # but only while actually emitting; idle ticks just resync to "now"
+            # each time; there is no real cadence to stay locked to.
+            if emit:
+                next_tick += period
+                slack = next_tick - time.monotonic()
+                if slack < -period:
+                    next_tick = time.monotonic() + period   # fell far behind, resync
+                    slack = period
+            else:
+                next_tick = time.monotonic() + _IDLE_TICK_S
+                slack = _IDLE_TICK_S
             await asyncio.sleep(max(slack, 0.0))
 
     # -- introspection ---------------------------------------------------

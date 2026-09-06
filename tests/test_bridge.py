@@ -302,3 +302,35 @@ async def test_the_trim_actually_dims_the_streamed_frame(wired):
     rear = int(bridge.last_frame[400].max())      # back: dimmed to 25%
     assert front > 150
     assert 0 < rear < front // 2
+
+
+async def test_output_loop_backs_off_when_nothing_is_emitted():
+    """Regression: the output loop used to tick at full output_fps (60Hz)
+    forever, even in mode "off" with no controller configured - pure waste
+    for however many hours a day nothing is actually being sent. It must
+    back off to a slow idle cadence instead, waking briefly to notice a
+    real state change rather than continuously computing a static frame."""
+    cfg = config_mod.default_config()
+    cfg["mode"] = "off"
+    cfg["source"]["tv_ip"] = ""
+    cfg["frames"]["output_fps"] = 60.0
+    bridge = Bridge(cfg)
+
+    tick_count = 0
+    real_tick = bridge.engine.tick
+
+    def counting_tick(*args, **kwargs):
+        nonlocal tick_count
+        tick_count += 1
+        return real_tick(*args, **kwargs)
+    bridge.engine.tick = counting_tick
+
+    await bridge.start()
+    try:
+        await asyncio.sleep(0.35)
+    finally:
+        await bridge.stop()
+
+    # At full 60Hz this window would produce ~21 ticks; idle backoff should
+    # land in the single digits.
+    assert 1 <= tick_count <= 8, f"expected a handful of idle ticks, got {tick_count}"

@@ -35,8 +35,12 @@ class Sender:
             pass
 
     def send(self, frame: np.ndarray) -> None:
-        """frame: (n, 3) float 0..255.  Fire and forget, no retries."""
-        data = np.clip(frame + 0.5, 0, 255).astype(np.uint8)
+        """frame: (n, 3) float 0..255, or already-quantised uint8 (the
+        common case: the caller already needed that exact conversion for
+        its own last-frame/preview bookkeeping, so redoing it here on every
+        call - up to output_fps times a second - would be pure waste).
+        Fire and forget, no retries."""
+        data = frame if frame.dtype == np.uint8 else np.clip(frame + 0.5, 0, 255).astype(np.uint8)
         for t in self.targets:
             host = t.get("host")
             if not host:
