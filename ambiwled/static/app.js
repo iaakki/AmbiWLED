@@ -754,10 +754,15 @@ function pageSource(body) {
 /* -- TV pairing: unlocks the real screen-power signal --------------------
    Some Philips TVs keep answering /ambilight/power with "on" for minutes
    after the screen actually goes dark (Quick-Start network standby).
-   Pairing once gets access to /powerstate and /screenstate, which don't. */
+   Pairing once gets access to /powerstate and /screenstate, which don't.
+   Shared between the Source (Advanced) page and the setup wizard - the
+   container id is the only thing that differs between the two. */
 
-function renderPairingBox() {
-  const box = $('#pairing-box');
+let pairingBoxId = 'pairing-box';
+
+function renderPairingBox(containerId) {
+  if (containerId) pairingBoxId = containerId;
+  const box = $('#' + pairingBoxId);
   if (!box) return;
   box.innerHTML = '';
   const paired = !!(cfg.source.pairing && cfg.source.pairing.device_id);
@@ -1333,6 +1338,7 @@ const WIZ_STEPS = [
   { k: 'Count the LEDs', t: '', s: 'Not sure which side this is? Tap flash and watch which one lights up.' },
   { k: 'Where you are', t: 'Where are you?', s: 'So the lights know when it gets dark outside.' },
   { k: 'Home Assistant', t: 'Home Assistant', s: 'Optional. Most people skip this.' },
+  { k: 'Accurate detection', t: 'Detect the TV turning off, reliably', s: "Recommended. Some TVs keep answering as if the screen is still on for a while after you turn it off - pairing fixes that." },
   { k: "All done", t: "That's it — you're set.", s: 'Turn the TV on and the ceiling will follow it.' },
 ];
 
@@ -1378,7 +1384,8 @@ function renderWizard() {
       (pct) => { const v = Math.min(pct, Math.round(cfg.dimming.day_level * 100) - 1) / 100; $('#wiz-night-label').textContent = Math.round(v * 100) + '%'; set('dimming.night_level', v); });
   }
   else if (wiz.step === 5) body.append(wizHa());
-  else if (wiz.step === 6) body.append(wizDone());
+  else if (wiz.step === 6) { body.append(wizPairing()); renderPairingBox('wiz-pairing-box'); }
+  else if (wiz.step === 7) body.append(wizDone());
 
   const dusk = $('#dusk-caption');
   dusk.hidden = wiz.step !== 4;
@@ -1514,6 +1521,11 @@ function wizHa() {
     el('div', { class: 'field-hint' }, "We'll try to log in before moving on, so you find out now rather than later."),
   );
   return wrap;
+}
+function wizPairing() {
+  return el('div', { style: 'display:flex;flex-direction:column;gap:12px' },
+    el('div', { id: 'wiz-pairing-box' }),
+    el('div', { class: 'field-hint' }, "Not required to finish setup - you can pair later from Advanced > Source if your TV doesn't support it or you'd rather skip it now."));
 }
 function wizDone() {
   const total = presentSlots().reduce((n, s) => n + edgeBySlot(s).pixel_count, 0);
