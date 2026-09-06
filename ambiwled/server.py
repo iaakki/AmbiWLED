@@ -13,6 +13,7 @@ from aiohttp import WSMsgType, web
 
 from . import config as config_mod
 from . import mqtt as mqtt_mod
+from . import pairing as pairing_mod
 from .bridge import Bridge
 from .wled import (WledClient, front_to_back_segment, segments_from_edges)
 
@@ -31,6 +32,7 @@ class Server:
         self._save_task: asyncio.Task | None = None
         self._save_pending = False
         self._preview_task: asyncio.Task | None = None
+        self._pairing_state: pairing_mod.PairingState | None = None
         self._setup_routes()
 
     def _setup_routes(self) -> None:
@@ -45,6 +47,8 @@ class Server:
         a.router.add_post("/api/wled/segments", self.push_segments)
         a.router.add_post("/api/resolve-link", self.resolve_link)
         a.router.add_post("/api/mqtt/test", self.test_mqtt)
+        a.router.add_post("/api/tv/pair/start", self.pair_tv_start)
+        a.router.add_post("/api/tv/pair/confirm", self.pair_tv_confirm)
         a.router.add_get("/ws", self.websocket)
         a.router.add_static("/static/", STATIC_DIR, name="static")
 
@@ -153,6 +157,46 @@ class Server:
             password = self.bridge.cfg.get("mqtt", {}).get("password", "")
         result = await mqtt_mod.test_connection(host, port, username, password)
         return web.json_response(result)
+
+    async def pair_tv_start(self, request: web.Request) -> web.Response:
+        """Begin JointSPACE pairing - unlocks the TV's real /powerstate and
+        /screenstate, which stay truthful through Quick-Start standby where
+        /ambilight/power does not (see pairing.py). The TV shows a PIN;
+        pair_tv_confirm() finishes with it."""
+        tv_ip = str(self.bridge.cfg.get("source", {}).get("tv_ip", "")).strip()
+        if not config_mod._is_host(tv_ip):
+            return web.json_response({"error": "set the TV address first"}, status=400)
+        try:
+            async with aiohttp.ClientSession() as session:
+                self._pairing_state = await pairing_mod.request_pin(session, tv_ip)
+        except pairing_mod.PairingError as exc:
+            return web.json_response({"error": str(exc)}, status=502)
+        return web.json_response({"ok": True})
+
+    async def pair_tv_confirm(self, request: web.Request) -> web.Response:
+        """Finish pairing with the PIN shown on the TV; persists the
+        resulting credentials on success."""
+        if self._pairing_state is None:
+            return web.json_response({"error": "start pairing first"}, status=400)
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "body is not valid JSON"}, status=400)
+        pin = str(body.get("pin", "")).strip()
+        if not pin:
+            return web.json_response({"error": "enter the PIN shown on the TV"}, status=400)
+        tv_ip = str(self.bridge.cfg.get("source", {}).get("tv_ip", "")).strip()
+        try:
+            async with aiohttp.ClientSession() as session:
+                device_id, auth_key = await pairing_mod.grant_pin(session, self._pairing_state, pin, tv_ip)
+        except pairing_mod.PairingError as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        finally:
+            self._pairing_state = None
+        errors = self.apply_patch({"source": {"pairing": {"device_id": device_id, "auth_key": auth_key}}})
+        if errors:
+            return web.json_response({"error": "; ".join(errors)}, status=400)
+        return web.json_response({"ok": True, "config": config_mod.redacted(self.bridge.cfg)})
 
     def apply_patch(self, patch: dict[str, Any]) -> list[str]:
         """Validate, apply and persist a partial config change.

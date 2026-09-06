@@ -289,7 +289,7 @@ async def test_another_source_driving_the_strip_is_flagged(udp_sink):
     bridge = Bridge(cfg)
     await bridge.start()
     try:
-        await _wait_for(lambda: bridge.should_emit(), timeout=8)
+        await _wait_for(lambda: bridge._emitting_since is not None, timeout=8)
         bridge._emitting_since -= 31          # past the settling window
         await _wait_for(lambda: bridge.metrics()["output_conflict"] is not None, timeout=8)
         assert "E1.31" in bridge.metrics()["output_conflict"]
@@ -313,7 +313,7 @@ async def test_local_override_is_reported(udp_sink):
     bridge = Bridge(cfg)
     await bridge.start()
     try:
-        await _wait_for(lambda: bridge.should_emit(), timeout=8)
+        await _wait_for(lambda: bridge._emitting_since is not None, timeout=8)
         assert bridge.metrics()["output_conflict"] is None, "must not flag immediately"
         bridge._emitting_since -= 31          # pretend we have been emitting a while
         await _wait_for(lambda: bridge.metrics()["output_conflict"] is not None, timeout=6)

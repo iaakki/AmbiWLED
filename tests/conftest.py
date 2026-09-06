@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import socket
 from pathlib import Path
 
@@ -60,6 +61,14 @@ def udp_sink():
     sock.close()
 
 
+@pytest.fixture
+async def aiohttp_client_session():
+    """A plain client session, for tests that talk to a fake server directly
+    rather than through Bridge/Server (test_pairing.py)."""
+    async with aiohttp.ClientSession() as session:
+        yield session
+
+
 @pytest.fixture(scope="session")
 def browser():
     """Headless Firefox, for the handful of tests in test_ui.py that check
@@ -77,6 +86,15 @@ def browser():
     from selenium import webdriver
     from selenium.common.exceptions import WebDriverException
     from selenium.webdriver.firefox.options import Options
+
+    # A sandboxed host without user namespaces (unshare(CLONE_NEWPID) -> EPERM)
+    # makes Firefox's content-process sandbox hang forever on first navigation
+    # instead of failing fast - these disable just that sandboxing, not the
+    # browser feature it's testing.
+    os.environ.setdefault("MOZ_DISABLE_CONTENT_SANDBOX", "1")
+    os.environ.setdefault("MOZ_DISABLE_GMP_SANDBOX", "1")
+    os.environ.setdefault("MOZ_DISABLE_RDD_SANDBOX", "1")
+    os.environ.setdefault("MOZ_DISABLE_GPU_SANDBOX", "1")
 
     def try_launch(binary_location=None):
         opts = Options()

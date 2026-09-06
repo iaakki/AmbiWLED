@@ -37,6 +37,8 @@ let advanced = false;
 let page = 'home';
 let wiz = null;               // {step, countIdx, pick, mqttTest, mqttErr} while running
 let pwEdit = false;            // Integrations page: password field unlocked
+let pairingStep = 'idle';      // Source page: 'idle' | 'awaiting-pin' | 'checking'
+let pairingError = '';
 let flashEdge = '';
 let confirmState = null;
 
@@ -58,7 +60,7 @@ const SOURCE_OPTIONS = [
 ];
 const TABS = [
   ['home', 'Home'], ['colour', 'Colour'], ['dim', 'Auto-dim'], ['source', 'Source'],
-  ['mapping', 'Mapping'], ['output', 'Output'], ['frames', 'Frame generation'],
+  ['mapping', 'Mapping'], ['output', 'Output'],
   ['integrations', 'Integrations'], ['config', 'Config'],
 ];
 
@@ -360,6 +362,7 @@ function renderPreviewFromPixels() {
 
 function renderLive() {
   renderPreviewFromPixels();
+  renderAmbientStrip();
   const on = get('mode') !== 'off';
   const emitting = !!metrics.emitting;
   const line = $('#status-line'), sub = $('#status-sub');
@@ -402,7 +405,8 @@ function diagText() {
   const m = metrics;
   const load = Array.isArray(m.load_avg) ? m.load_avg.map((v) => v.toFixed(2)).join(' ') : '–';
   return `ws   /ws        open · ${m.source_fps ?? 0} fps in · ${m.output_fps ?? 0} fps out\n`
-    + `tv   ${cfg.source.tv_ip || '(not set)'} ${m.tv_state || '?'} · ${m.source_latency_ms ?? '–'} ms · ${m.failed_polls ?? 0} failed polls\n`
+    + `tv   ${cfg.source.tv_ip || '(not set)'} ${m.tv_state || '?'} · ${m.source_latency_ms ?? '–'} ms · ${m.failed_polls ?? 0} failed polls`
+    + `${m.tv_paired ? ` · screen ${m.screen_on === null || m.screen_on === undefined ? 'unknown' : (m.screen_on ? 'on' : 'off')}` : ''}\n`
     + `wled ${(cfg.output.targets[0] || {}).host || '(not set)'} ${metrics.targets_online ? 'ok' : 'unreachable'}\n`
     + `mqtt ${cfg.mqtt.enabled ? (metrics.mqtt && metrics.mqtt.connected ? 'connected' : 'connecting') : 'disabled'}\n`
     + `cpu  ${m.cpu_percent ?? 0}% of 1 core · ${m.cpu_count ?? '?'} core${m.cpu_count === 1 ? '' : 's'} available · load ${load}`;
@@ -487,7 +491,7 @@ function renderPage() {
   body.innerHTML = '';
   const renderers = {
     home: pageHome, colour: pageColour, dim: pageDim, source: pageSource,
-    mapping: pageMapping, output: pageOutput, frames: pageFrames,
+    mapping: pageMapping, output: pageOutput,
     integrations: pageIntegrations, config: pageConfig,
   };
   (renderers[page] || pageHome)(body);
@@ -499,11 +503,43 @@ function renderPage() {
 function pageHome(body) {
   body.append(el('div', { class: 'page' },
     el('div', { class: 'ambient-strip' },
+      el('div', { class: 'ambient-fill', id: 'ambient-fill' }),
       el('div', { class: 'caption' }, 'live · one websocket')),
     el('div', { class: 'summary-list', id: 'summary-list' }),
     el('div', { class: 'field-hint' }, 'The preview keeps streaming while you move between these pages — one socket, never renegotiated.'),
+    el('div', { style: 'height:1px;background:var(--color-divider)' }),
+    el('div', {}, el('div', { class: 'section-title' }, 'Mode'), el('div', { id: 'mode-wrap' })),
   ));
   renderSummaryRows();
+  renderModeSwitch();
+  renderAmbientStrip();
+}
+function renderAmbientStrip() {
+  const fill = $('#ambient-fill');
+  if (!fill) return;
+  const slots = presentSlots();
+  const colours = slots.length ? slots.map((s) => edgeAverageColour(s) || '#0c0a08') : ['#0c0a08'];
+  fill.style.background = colours.length > 1
+    ? `linear-gradient(90deg, ${colours.join(', ')})`
+    : colours[0];
+}
+function renderModeSwitch() {
+  const wrap = $('#mode-wrap');
+  if (!wrap) return;
+  wrap.innerHTML = '';
+  wrap.style.cssText = 'display:flex;flex-direction:column;gap:8px';
+  const modes = [
+    ['ambilight', 'Follow the TV', 'Colour comes from what is on screen'],
+    ['preset', 'Hold a WLED preset', 'Leaves the strip on whatever WLED is doing'],
+    ['off', 'Off', 'Nothing is sent to the controller'],
+  ];
+  for (const [id, label, hint] of modes) {
+    wrap.append(el('button', {
+      class: 'option-btn' + (cfg.mode === id ? ' active' : ''),
+      onclick: () => { set('mode', id, true); renderPage(); renderSimple(); },
+    }, el('span', { class: 'dot' }), el('span', { class: 'label' },
+      el('span', { class: 'name' }, label), el('span', { class: 'hint' }, hint))));
+  }
 }
 function renderSummaryRows() {
   const list = $('#summary-list');
@@ -527,22 +563,7 @@ function renderSummaryRows() {
 /* -- Colour -- */
 
 function pageColour(body) {
-  const modes = [
-    ['ambilight', 'Follow the TV', 'Colour comes from what is on screen'],
-    ['preset', 'Hold a WLED preset', 'Leaves the strip on whatever WLED is doing'],
-    ['off', 'Off', 'Nothing is sent to the controller'],
-  ];
-  const modeWrap = el('div', { style: 'display:flex;flex-direction:column;gap:8px' });
-  for (const [id, label, hint] of modes) {
-    modeWrap.append(el('button', {
-      class: 'option-btn' + (cfg.mode === id ? ' active' : ''),
-      onclick: () => { set('mode', id, true); renderPage(); renderSimple(); },
-    }, el('span', { class: 'dot' }), el('span', { class: 'label' },
-      el('span', { class: 'name' }, label), el('span', { class: 'hint' }, hint))));
-  }
-
   const page1 = el('div', { class: 'page' },
-    el('div', {}, el('div', { class: 'section-title' }, 'Mode'), modeWrap),
     el('div', {},
       el('div', { class: 'field-title' }, el('span', { class: 'name' }, 'Colour strength'),
         el('span', { class: 'value', id: 'strength-label' })),
@@ -706,6 +727,8 @@ function pageSource(body) {
       el('div', { class: 'field-hint' }, pollHint()),
       el('div', { class: 'chip-row', id: 'poll-chips' })),
     el('div', { class: 'field-hint', id: 'poll-warn' }),
+    el('div', { style: 'height:1px;background:var(--color-divider)' }),
+    el('div', { id: 'pairing-box' }),
   ));
 
   const tvIp = $('#tv-ip');
@@ -724,7 +747,105 @@ function pageSource(body) {
     }, v + ' fps'));
   }
   pollWarn();
+  renderPairingBox();
   pageSourceMeta();
+}
+
+/* -- TV pairing: unlocks the real screen-power signal --------------------
+   Some Philips TVs keep answering /ambilight/power with "on" for minutes
+   after the screen actually goes dark (Quick-Start network standby).
+   Pairing once gets access to /powerstate and /screenstate, which don't.
+   Shared between the Source (Advanced) page and the setup wizard - the
+   container id is the only thing that differs between the two. */
+
+let pairingBoxId = 'pairing-box';
+
+function renderPairingBox(containerId) {
+  if (containerId) pairingBoxId = containerId;
+  const box = $('#' + pairingBoxId);
+  if (!box) return;
+  box.innerHTML = '';
+  const paired = !!(cfg.source.pairing && cfg.source.pairing.device_id);
+
+  if (paired) {
+    box.append(
+      el('div', { class: 'field-title' }, el('span', { class: 'name' }, 'Accurate power detection'),
+        el('span', { class: 'value' }, 'Paired')),
+      el('div', { class: 'field-hint' }, "Screen on/off comes straight from the TV, so the strip reverts promptly even through standby - not just once the TV stops answering entirely."),
+      el('button', { class: 'pill-btn', onclick: () => unpairTv() }, 'Unpair'),
+    );
+    return;
+  }
+
+  box.append(
+    el('div', { class: 'field-title' }, el('span', { class: 'name' }, 'Accurate power detection'), el('span', { class: 'value' }, 'Not paired')),
+    el('div', { class: 'field-hint' }, "Without this, AmbiWled only knows the TV is off once it stops answering at all - which some sets delay for a while after the screen goes dark. Pairing (one-time) gets a truthful answer instead."),
+  );
+
+  if (pairingStep === 'idle') {
+    box.append(el('button', { class: 'pill-btn', onclick: () => startTvPairing() }, 'Pair for accurate detection'));
+  } else if (pairingStep === 'awaiting-pin') {
+    box.append(
+      el('div', { class: 'field' }, el('label', {}, 'PIN shown on the TV'),
+        el('input', { class: 'input', id: 'pairing-pin', inputmode: 'numeric', placeholder: '1234' })),
+      el('div', { style: 'display:flex;gap:8px' },
+        el('button', { class: 'cta-btn', onclick: () => confirmTvPairing() }, 'Confirm'),
+        el('button', { class: 'pill-btn', onclick: () => { pairingStep = 'idle'; renderPairingBox(); } }, 'Cancel')),
+    );
+  } else if (pairingStep === 'checking') {
+    box.append(el('div', { class: 'field-hint' }, 'Checking…'));
+  }
+  if (pairingError) box.append(el('div', { class: 'field-hint', style: 'color:var(--err)' }, pairingError));
+}
+
+async function startTvPairing() {
+  pairingError = '';
+  pairingStep = 'checking';
+  renderPairingBox();
+  try {
+    const r = await fetch('/api/tv/pair/start', { method: 'POST' });
+    const data = await r.json();
+    if (!r.ok) { pairingError = data.error || 'could not start pairing'; pairingStep = 'idle'; renderPairingBox(); return; }
+    pairingStep = 'awaiting-pin';
+    renderPairingBox();
+  } catch (err) {
+    pairingError = 'could not reach the server';
+    pairingStep = 'idle';
+    renderPairingBox();
+  }
+}
+
+async function confirmTvPairing() {
+  const pin = ($('#pairing-pin')?.value || '').trim();
+  if (!pin) return;
+  pairingError = '';
+  pairingStep = 'checking';
+  renderPairingBox();
+  try {
+    const r = await fetch('/api/tv/pair/confirm', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pin }),
+    });
+    const data = await r.json();
+    if (!r.ok) {
+      pairingError = data.error || 'pairing failed';
+      pairingStep = 'awaiting-pin';
+      renderPairingBox();
+      return;
+    }
+    cfg = data.config;
+    pairingStep = 'idle';
+    toast('Paired');
+    renderPairingBox();
+  } catch (err) {
+    pairingError = 'could not reach the server';
+    pairingStep = 'awaiting-pin';
+    renderPairingBox();
+  }
+}
+
+function unpairTv() {
+  set('source.pairing', { device_id: '', auth_key: '' }, true);
+  renderPairingBox();
 }
 function pollHint() { return 'Frames a second read off the TV. Frame generation fills the gap between this and what the strip gets.'; }
 function pollWarn() {
@@ -849,6 +970,7 @@ function pageOutput(body) {
       el('span', { class: 'body' }, el('span', { class: 'name' }, 'Reachable'), el('span', { class: 'meta', id: 'output-summary' }))),
     el('button', { class: 'cta-btn', onclick: () => confirmPush() }, 'Push segments to the controller'),
     el('div', { class: 'field-hint' }, 'One segment per side, front to back — so WLED\'s own effects line up with your ceiling. Overwrites the layout stored on the device.'),
+    el('div', { style: 'height:1px;background:var(--color-divider)' }),
   ));
   const hostInput = $('#wled-host');
   hostInput.addEventListener('change', () => {
@@ -857,6 +979,7 @@ function pageOutput(body) {
     targets[0] = Object.assign({}, targets[0], { host: hostInput.value.trim(), enabled: !!hostInput.value.trim(), pixel_count: cfg.led.count });
     set('output.targets', targets, true);
   });
+  pageFrameGeneration(body.querySelector('.page'));
   renderLive();
 }
 function confirmPush() {
@@ -871,16 +994,17 @@ function confirmPush() {
     });
 }
 
-/* -- Frame generation -- */
+/* -- Frame generation (part of the Output page) -- */
 
-function pageFrames(body) {
+function pageFrameGeneration(pageEl) {
   const poll = cfg.source.poll_hz;
   const mults = [];
   for (let k = 1; k * poll <= 120; k++) mults.push(k * poll);
   const cur = Math.max(0, mults.indexOf(cfg.frames.output_fps));
   const madeUp = Math.max(0, Math.round(cfg.frames.output_fps / poll) - 1);
 
-  body.append(el('div', { class: 'page' },
+  pageEl.append(
+    el('div', { class: 'section-title' }, 'Frame generation'),
     el('div', {},
       el('div', { class: 'field-title' }, el('span', { class: 'name' }, 'Frames sent to the strip'), el('span', { class: 'value' }, cfg.frames.output_fps + ' fps')),
       el('div', { class: 'field-hint' }, madeUp === 0
@@ -900,7 +1024,7 @@ function pageFrames(body) {
     el('div', { class: 'callout' },
       el('svg', { width: '18', height: '18', viewBox: '0 0 24 24', fill: 'none', stroke: 'var(--color-accent)', 'stroke-width': '2.75', 'stroke-linecap': 'round' }),
       el('span', {}, "Turn WLED's own crossfade off while AmbiWled is streaming — two smoothing stages in a row turn the picture to mush.")),
-  ));
+  );
 
   const pct = mults.length > 1 ? Math.round((cur / (mults.length - 1)) * 100) : 0;
   wireSlider($('#fps-track'), $('#fps-thumb'), $('#fps-fill'), 32,
@@ -1214,6 +1338,7 @@ const WIZ_STEPS = [
   { k: 'Count the LEDs', t: '', s: 'Not sure which side this is? Tap flash and watch which one lights up.' },
   { k: 'Where you are', t: 'Where are you?', s: 'So the lights know when it gets dark outside.' },
   { k: 'Home Assistant', t: 'Home Assistant', s: 'Optional. Most people skip this.' },
+  { k: 'Accurate detection', t: 'Detect the TV turning off, reliably', s: "Recommended. Some TVs keep answering as if the screen is still on for a while after you turn it off - pairing fixes that." },
   { k: "All done", t: "That's it — you're set.", s: 'Turn the TV on and the ceiling will follow it.' },
 ];
 
@@ -1259,7 +1384,8 @@ function renderWizard() {
       (pct) => { const v = Math.min(pct, Math.round(cfg.dimming.day_level * 100) - 1) / 100; $('#wiz-night-label').textContent = Math.round(v * 100) + '%'; set('dimming.night_level', v); });
   }
   else if (wiz.step === 5) body.append(wizHa());
-  else if (wiz.step === 6) body.append(wizDone());
+  else if (wiz.step === 6) { body.append(wizPairing()); renderPairingBox('wiz-pairing-box'); }
+  else if (wiz.step === 7) body.append(wizDone());
 
   const dusk = $('#dusk-caption');
   dusk.hidden = wiz.step !== 4;
@@ -1395,6 +1521,11 @@ function wizHa() {
     el('div', { class: 'field-hint' }, "We'll try to log in before moving on, so you find out now rather than later."),
   );
   return wrap;
+}
+function wizPairing() {
+  return el('div', { style: 'display:flex;flex-direction:column;gap:12px' },
+    el('div', { id: 'wiz-pairing-box' }),
+    el('div', { class: 'field-hint' }, "Not required to finish setup - you can pair later from Advanced > Source if your TV doesn't support it or you'd rather skip it now."));
 }
 function wizDone() {
   const total = presentSlots().reduce((n, s) => n + edgeBySlot(s).pixel_count, 0);

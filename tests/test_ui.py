@@ -244,3 +244,95 @@ async def test_wizard_reaching_the_location_step_turns_autodim_on(running, brows
     before, after = await _in_thread(_wizard_location_body, browser, base)
     assert before is False
     assert after is True
+
+
+# -- tab layout: Frame generation folded into Output, Mode moved to Home ---
+
+def _tab_layout_body(browser, base):
+    browser.get(base)
+    _wait_booted(browser)
+    browser.find_element(By.ID, "open-advanced").click()
+    tabs = [t.text.strip() for t in browser.find_elements(By.CSS_SELECTOR, "#tab-bar .tab-btn")]
+
+    _click_tab(browser, "Output")
+    time.sleep(0.3)
+    output_text = browser.find_element(By.ID, "page-body").text
+
+    _click_tab(browser, "Colour")
+    time.sleep(0.3)
+    colour_text = browser.find_element(By.ID, "page-body").text
+
+    _click_tab(browser, "Home")
+    time.sleep(0.3)
+    home_text = browser.find_element(By.ID, "page-body").text
+
+    return tabs, output_text, colour_text, home_text
+
+
+async def test_frame_generation_lives_under_output_not_its_own_tab(running, browser):
+    """Regression: Frame generation used to be its own top-level tab. It
+    only ever controls how the strip is driven (output_fps), so it belongs
+    alongside the WLED controller settings on Output, not as a whole tab of
+    its own."""
+    _, bridge, base, session, _ = running
+    tabs, output_text, colour_text, home_text = await _in_thread(_tab_layout_body, browser, base)
+    assert "Frame generation" not in tabs
+    assert "Frame generation" in output_text
+    assert "Frames sent to the strip" in output_text
+
+
+async def test_mode_switch_lives_on_home_not_colour(running, browser):
+    """Regression: choosing ambilight/preset/off used to live at the top of
+    the Colour tab, an odd home for something that is not a colour setting
+    at all. It belongs on Home, appended after the live summary."""
+    _, bridge, base, session, _ = running
+    tabs, output_text, colour_text, home_text = await _in_thread(_tab_layout_body, browser, base)
+    assert "Follow the TV" not in colour_text
+    assert "Hold a WLED preset" not in colour_text
+    assert "Follow the TV" in home_text
+    assert "Hold a WLED preset" in home_text
+
+
+# -- wizard: TV pairing is offered but must not block finishing setup ------
+
+def _wizard_pairing_step_body(browser, base):
+    browser.get(base)
+    _wait_booted(browser)
+    browser.execute_script("window.startWizard()")
+    time.sleep(0.4)
+    next_btn = browser.find_element(By.ID, "wiz-next")
+    # JS-dispatched, not a native Selenium click: the debounced "Saved"
+    # toast from an earlier step's autosave can still be fading out and
+    # physically overlap the button at this click rate, which a real
+    # slower-clicking user would never hit.
+    def click_next():
+        browser.execute_script("document.getElementById('wiz-next').click()")
+    # Same seven clicks as the location-step test reach "Where you are";
+    # two more (Where you are -> Home Assistant -> Accurate detection,
+    # HA left off by default so it falls straight through) land here.
+    for _ in range(9):
+        click_next()
+        time.sleep(0.2)
+    step_text = browser.find_element(By.ID, "wiz-body").text
+    wiz_open_at_pairing = not browser.find_element(By.ID, "wizard").get_attribute("hidden")
+
+    click_next()  # -> Done
+    time.sleep(0.2)
+    done_text = browser.find_element(By.ID, "wiz-body").text
+
+    click_next()  # finish
+    time.sleep(0.3)
+    wizard_hidden_after = browser.find_element(By.ID, "wizard").get_attribute("hidden")
+    return step_text, wiz_open_at_pairing, done_text, wizard_hidden_after
+
+
+async def test_wizard_offers_pairing_but_finishes_without_it(running, browser):
+    """Pairing is recommended, not required: a fresh install has no way to
+    know whether this TV even supports /powerstate - the wizard must reach
+    "All done" and actually close on Next alone, with no pairing attempted."""
+    _, bridge, base, session, _ = running
+    step_text, was_open, done_text, hidden_after = await _in_thread(_wizard_pairing_step_body, browser, base)
+    assert was_open
+    assert "Pair for accurate detection" in step_text
+    assert "That's it" in done_text or "you're set" in done_text
+    assert hidden_after == "true"

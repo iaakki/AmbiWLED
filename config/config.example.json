@@ -13,7 +13,11 @@
     "fail_threshold": 3,
     "off_probe_interval_s": 5.0,
     "adaptive_backoff": true,
-    "ambilight_power_check_s": 3.0
+    "ambilight_power_check_s": 3.0,
+    "pairing": {
+      "device_id": "",
+      "auth_key": ""
+    }
   },
   "led": {
     "count": 462
