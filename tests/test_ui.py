@@ -336,3 +336,35 @@ async def test_wizard_offers_pairing_but_finishes_without_it(running, browser):
     assert "Pair for accurate detection" in step_text
     assert "That's it" in done_text or "you're set" in done_text
     assert hidden_after == "true"
+
+
+# -- room preview: the "screen" and its glow used to be fixed decoration ---
+
+def _room_preview_colours_body(browser, base):
+    browser.get(base)
+    _wait_booted(browser)
+    time.sleep(0.3)
+    stop_colours = browser.execute_script("""
+        return [0, 1, 2].map(i => document.getElementById('amTv-' + i).getAttribute('stop-color'));
+    """)
+    bloom_fill = browser.execute_script("return document.getElementById('pv-bloom').getAttribute('fill')")
+    return stop_colours, bloom_fill
+
+
+async def test_room_preview_screen_is_not_a_fixed_fake_gradient(running, browser):
+    """Regression: the "screen" rectangle and the glow behind it were fixed
+    decoration (a hardcoded blue/pink/orange gradient, a hardcoded amber
+    blob) that never changed regardless of what was actually on screen -
+    misleading right next to a caption reading "your room, right now".
+    This fixture's Bridge never runs a real output loop, so the only frame
+    a fresh connection ever sees is the all-zero one Bridge starts with -
+    genuine "no picture yet" data, not the neutral placeholder colour. That
+    is still the point: real data, black included, not a fixed decoration
+    that would show the exact same bright gradient regardless."""
+    _, bridge, base, session, _ = running
+    stop_colours, bloom_fill = await _in_thread(_room_preview_colours_body, browser, base)
+    old_fakes = {'#3f6fd0', '#c9455f', '#e8913c'}
+    assert not (set(stop_colours) & old_fakes)
+    assert bloom_fill not in old_fakes
+    assert all(c in ('#26221e', 'rgb(0,0,0)') for c in stop_colours)
+    assert bloom_fill in ('#26221e', 'rgb(0,0,0)')

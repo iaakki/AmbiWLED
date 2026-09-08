@@ -332,6 +332,23 @@ function edgeAverageColour(slot) {
   return `rgb(${r},${g},${b})`;
 }
 
+/** N colours evenly spread across one edge's raw pixels - not averaged
+    into one blob, so a screen mock-up drawn from them shows some actual
+    left-right variation instead of a flat tint. */
+function edgeSampleColours(slot, n) {
+  const e = edgeBySlot(slot);
+  if (!e || e.source === 'off' || !pixels.length) return null;
+  const start = e.pixel_start * 3, count = e.pixel_count;
+  if (count <= 0 || start + count * 3 > pixels.length) return null;
+  const out = [];
+  for (let k = 0; k < n; k++) {
+    const i = Math.min(count - 1, Math.floor(((k + 0.5) / n) * count));
+    const p = start + i * 3;
+    out.push(`rgb(${pixels[p]},${pixels[p + 1]},${pixels[p + 2]})`);
+  }
+  return out;
+}
+
 function paintPreview(prefix) {
   const on = get('mode') !== 'off';
   for (const slot of SLOTS) {
@@ -348,6 +365,28 @@ function paintPreview(prefix) {
     }
     if (poly) { poly.setAttribute('fill', colour); poly.setAttribute('opacity', opacity); }
     if (line) { line.setAttribute('stroke', colour); line.setAttribute('stroke-opacity', opacity); }
+  }
+  if (prefix !== 'pv') return;
+  // The "screen" rectangle used to be a fixed decorative gradient, always
+  // showing the same bright blue/pink/orange regardless of what the TV was
+  // actually doing - misleading right next to a caption that says "right
+  // now". It's real data now: three samples off the front edge, the one
+  // that actually sits around the screen.
+  const stops = [$('#amTv-0'), $('#amTv-1'), $('#amTv-2')];
+  const sample = on ? edgeSampleColours('front', 3) : null;
+  const off = '#26221e';
+  for (let i = 0; i < stops.length; i++) {
+    if (stops[i]) stops[i].setAttribute('stop-color', sample ? sample[i] : off);
+  }
+  // Same story for the soft glow behind the screen: it's meant to read as
+  // light spilling from the picture, so it has to actually be that light's
+  // colour - a fixed amber blob glowing the same regardless of what's on
+  // screen, dark scenes included, was the same kind of always-on fakery.
+  const bloom = $('#pv-bloom');
+  if (bloom) {
+    const avg = on ? edgeAverageColour('front') : null;
+    bloom.setAttribute('fill', avg || off);
+    bloom.setAttribute('opacity', avg ? 0.5 : 0.15);
   }
 }
 function renderPreviewFromPixels() {
