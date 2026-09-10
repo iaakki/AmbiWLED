@@ -459,14 +459,17 @@ function renderLive() {
       + `${metrics.source_latency_ms ?? '–'} ms · ${metrics.failed_polls ?? 0} failed`;
   }
   if (advanced && page === 'output') {
+    // targets_online is a list of reachable hosts, not a count or a plain
+    // bool - an empty array is still truthy in JS, so every one of these
+    // used to read as "reachable" regardless of what was actually in it.
+    const online = (metrics.targets_online || []).length;
     const s = $('#output-summary');
     if (s) {
-      const online = metrics.targets_online || 0;
       const total = presentSlots().reduce((n, sl) => n + edgeBySlot(sl).pixel_count, 0);
       s.textContent = `${presentSlots().length} segments · ${total} LEDs · ${online} controller${online === 1 ? '' : 's'} reachable`;
     }
     const dot = $('#output-dot');
-    if (dot) dot.classList.toggle('bad', !(metrics.targets_online > 0));
+    if (dot) dot.classList.toggle('bad', online === 0);
   }
   if (advanced && page === 'config') {
     const d = $('#diag-box');
@@ -483,7 +486,7 @@ function diagText() {
   return `ws   /ws        open · ${m.source_fps ?? 0} fps in · ${m.output_fps ?? 0} fps out\n`
     + `tv   ${cfg.source.tv_ip || '(not set)'} ${m.tv_state || '?'} · ${m.source_latency_ms ?? '–'} ms · ${m.failed_polls ?? 0} failed polls`
     + `${m.tv_paired ? ` · screen ${m.screen_on === null || m.screen_on === undefined ? 'unknown' : (m.screen_on ? 'on' : 'off')}` : ''}\n`
-    + `wled ${(cfg.output.targets[0] || {}).host || '(not set)'} ${metrics.targets_online ? 'ok' : 'unreachable'}\n`
+    + `wled ${(cfg.output.targets[0] || {}).host || '(not set)'} ${(m.targets_online || []).length > 0 ? 'ok' : 'unreachable'}\n`
     + `mqtt ${cfg.mqtt.enabled ? (metrics.mqtt && metrics.mqtt.connected ? 'connected' : 'connecting') : 'disabled'}\n`
     + `cpu  ${m.cpu_percent ?? 0}% of 1 core · ${m.cpu_count ?? '?'} core${m.cpu_count === 1 ? '' : 's'} available · load ${load}`;
 }

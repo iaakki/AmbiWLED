@@ -423,3 +423,35 @@ async def test_advanced_home_shows_the_same_live_room_preview_as_simple(running,
     assert result["sameAcrossViews"]
     assert result["frontFilterAttr"] == "url(#amGlow)"
     assert result["bboxOk"]
+
+
+# -- Output/Diagnostics: an empty targets_online list is still truthy in JS -
+
+def _controller_unreachable_text_body(browser, base):
+    browser.get(base)
+    _wait_booted(browser)
+    browser.find_element(By.ID, "open-advanced").click()
+    _click_tab(browser, "Output")
+    time.sleep(1.0)  # let a real metrics tick arrive over the websocket
+    output_summary = browser.find_element(By.ID, "output-summary").text
+    dot_classes = browser.find_element(By.ID, "output-dot").get_attribute("class")
+    _click_tab(browser, "Config")
+    time.sleep(0.3)
+    diag_text = browser.find_element(By.ID, "diag-box").text
+    return output_summary, dot_classes, diag_text
+
+
+async def test_unreachable_controller_reads_as_unreachable_not_ok(running, browser):
+    """Regression: metrics.targets_online is a list of reachable hosts, not
+    a count or a plain bool - an *empty* array is still truthy in
+    JavaScript, so `targets_online ? 'ok' : 'unreachable'` (and a couple of
+    similar count/dot checks) always read "ok"/reachable regardless of
+    what was actually in the list. This fixture's Bridge has no reachable
+    controller configured, so every one of these must show the unreachable
+    side, not silently claim success."""
+    _, bridge, base, session, _ = running
+    output_summary, dot_classes, diag_text = await _in_thread(_controller_unreachable_text_body, browser, base)
+    assert "0 controllers reachable" in output_summary
+    assert "bad" in dot_classes.split()
+    assert "wled" in diag_text and "unreachable" in diag_text
+    assert " ok" not in diag_text.split("wled", 1)[1].split("\n", 1)[0]
