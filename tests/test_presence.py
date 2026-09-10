@@ -192,6 +192,30 @@ async def test_stops_when_the_controller_is_unreachable(wired):
     assert recv() == [], "no point shouting at a controller that is gone"
 
 
+async def test_polling_the_tv_backs_off_when_the_controller_is_unreachable(wired):
+    """Reported directly: the TV stayed on, the controller was unreachable,
+    and the process kept real CPU load - polling the TV at full rate and
+    running every frame through mapping/colour for a controller that cannot
+    receive any of it is exactly the waste the output loop's own idle
+    backoff (bridge.py) doesn't cover, since that only slows the send side.
+    poll_hz=50 here: full rate over the sleep window below would be dozens
+    of real polls; backed off (off_probe_interval_s=0.2) it should be at
+    most one or two."""
+    bridge, tv, wled, recv = wired
+    await _wait_for(lambda: bridge.should_emit(), timeout=6)
+
+    wled.up = False
+    await _wait_for(lambda: not bridge.should_emit(), timeout=8)
+    requests_at_stop = tv.requests
+    await asyncio.sleep(1.0)
+    assert tv.requests - requests_at_stop <= 3, (
+        "TV polling did not back off once nothing could consume the data")
+
+    # And it must actually resume promptly once there is a reason to again.
+    wled.up = True
+    await _wait_for(lambda: bridge.should_emit(), timeout=8)
+
+
 async def test_resumes_when_the_controller_returns(wired):
     bridge, tv, wled, recv = wired
     wled.up = False

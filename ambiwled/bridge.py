@@ -50,7 +50,7 @@ class Bridge:
         self.health = TargetHealth(cfg)
         self.mqtt = MqttBridge(cfg, self.metrics, self._on_mqtt_command,
                                self._on_mqtt_action)
-        self.poller = SourcePoller(cfg, self._on_zones, self._on_state)
+        self.poller = SourcePoller(cfg, self._on_zones, self._on_state, self._should_poll_fast)
 
         self.zones: np.ndarray | None = None
         self.mapped = np.zeros((self.led_count, 3), dtype=np.float32)
@@ -139,6 +139,20 @@ class Bridge:
         if not self.health.any_online():
             return False
         return self.poller.state == "streaming" and self.poller.ambilight_on is not False
+
+    def _should_poll_fast(self) -> bool:
+        """Whether polling the TV right now can lead anywhere.
+
+        Deliberately *not* gated on mode: "off"/"preset" still want
+        tv_state accurate and live for diagnostics even though nothing is
+        being emitted - always has, see test_off_mode_stays_silent and
+        test_preset_mode_ignores_the_tv_entirely. An unreachable output
+        target is different: there is no consumer at all for a fresh
+        frame, mode aside, so there is no reason to poll the TV at full
+        rate and run every frame through mapping/colour in the meantime -
+        see SourcePoller.should_poll_fast.
+        """
+        return self.health.any_online()
 
     def _output_conflict(self) -> str | None:
         """Whether our stream is actually reaching the strip.
