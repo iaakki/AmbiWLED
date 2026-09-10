@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AmbiWled</title>
+<link rel="stylesheet" href="/static/organic.css">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<div id="app">
+
+  <div class="status-bar">
+    <span id="clock">--:--</span>
+    <span class="link-dot" id="link-dot" title="Live link"></span>
+  </div>
+
+  <!-- ================= SIMPLE ================= -->
+  <main id="simple-view" class="view">
+    <div class="simple-header">
+      <div class="wordmark">AmbiWled</div>
+      <div class="header-actions">
+        <button class="icon-btn" id="theme-toggle" title="Day or night look">
+          <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.75" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"></path></svg>
+        </button>
+        <button class="icon-btn" id="open-advanced" title="Advanced settings">
+          <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9c.14.6.66 1.04 1.28 1.09H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+        </button>
+      </div>
+    </div>
+
+    <div class="preview" id="room-preview">
+      <svg viewBox="0 0 320 200" preserveAspectRatio="xMidYMid slice">
+        <defs>
+          <filter id="amGlow" x="-60%" y="-60%" width="220%" height="220%" color-interpolation-filters="sRGB"><feGaussianBlur stdDeviation="10"></feGaussianBlur></filter>
+          <filter id="amSoft" x="-60%" y="-60%" width="220%" height="220%" color-interpolation-filters="sRGB"><feGaussianBlur stdDeviation="4"></feGaussianBlur></filter>
+          <linearGradient id="amCeil" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#241c16"></stop><stop offset="1" stop-color="#14100c"></stop></linearGradient>
+          <linearGradient id="amWall" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#171310"></stop><stop offset="1" stop-color="#0b0908"></stop></linearGradient>
+          <linearGradient id="amTv-pv" x1="0" y1="0" x2="1" y2="1"><stop id="amTv-pv-0" offset="0" stop-color="#26221e"></stop><stop id="amTv-pv-1" offset="0.5" stop-color="#26221e"></stop><stop id="amTv-pv-2" offset="1" stop-color="#26221e"></stop></linearGradient>
+        </defs>
+        <rect width="320" height="200" fill="#0c0a08"></rect>
+        <polygon points="0,0 320,0 250,96 70,96" fill="url(#amCeil)"></polygon>
+        <rect y="96" width="320" height="104" fill="url(#amWall)"></rect>
+        <g filter="url(#amGlow)">
+          <polygon id="pv-front" points="70,96 250,96 232,60 88,60" fill="transparent" opacity="0"></polygon>
+          <polygon id="pv-left" points="0,0 70,96 112,96 34,0" fill="transparent" opacity="0"></polygon>
+          <polygon id="pv-right" points="320,0 250,96 208,96 286,0" fill="transparent" opacity="0"></polygon>
+          <rect id="pv-back" x="0" y="-10" width="320" height="34" fill="transparent" opacity="0"></rect>
+          <ellipse id="pv-bloom" cx="160" cy="150" rx="120" ry="46" fill="#26221e" opacity="0.5"></ellipse>
+        </g>
+        <g filter="url(#amSoft)" stroke-linecap="round">
+          <line id="pv-front-ln" x1="70" y1="96" x2="250" y2="96" stroke="transparent" stroke-opacity="0" stroke-width="4"></line>
+          <line id="pv-left-ln" x1="0" y1="0" x2="70" y2="96" stroke="transparent" stroke-opacity="0" stroke-width="4"></line>
+          <line id="pv-right-ln" x1="320" y1="0" x2="250" y2="96" stroke="transparent" stroke-opacity="0" stroke-width="4"></line>
+          <line id="pv-back-ln" x1="0" y1="3" x2="320" y2="3" stroke="transparent" stroke-opacity="0" stroke-width="5"></line>
+        </g>
+        <rect x="116" y="112" width="88" height="52" rx="3" fill="url(#amTv-pv)" opacity="0.92"></rect>
+        <rect x="116" y="112" width="88" height="52" rx="3" fill="none" stroke="rgba(255,255,255,.14)"></rect>
+        <text x="160" y="188" text-anchor="middle" font-size="8" letter-spacing="1.6" fill="rgba(255,255,255,.45)" font-family="Figtree, sans-serif">YOUR ROOM, RIGHT NOW</text>
+      </svg>
+      <div class="veil" id="preview-veil"></div>
+    </div>
+
+    <div class="status-copy">
+      <div class="status-line" id="status-line">…</div>
+      <div class="status-sub" id="status-sub" hidden></div>
+    </div>
+
+    <button class="power-switch" id="power-switch">
+      <div class="knob">
+        <svg width="29" height="29" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v9"></path><path d="M18.4 6.6a9 9 0 1 1-12.8 0"></path></svg>
+      </div>
+      <span class="label" id="power-label">Off</span>
+    </button>
+
+    <div class="brightness-block" id="brightness-block">
+      <div class="row-label">
+        <span class="name">Brightness</span>
+        <span class="value"><b id="bright-label">0%</b><small id="bright-eff"></small></span>
+      </div>
+      <div class="slider" id="bright-slider">
+        <div class="fill-track"><div class="fill" id="bright-fill"></div></div>
+        <div class="thumb" id="bright-thumb"></div>
+      </div>
+    </div>
+
+    <div class="toggle-row">
+      <svg class="icon" width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.75" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"></path></svg>
+      <span class="name">Dim at night</span>
+      <button class="toggle-switch" id="autodim-toggle"><span class="knob"></span></button>
+    </div>
+  </main>
+
+  <!-- ================= ADVANCED ================= -->
+  <main id="advanced-view" class="view" hidden>
+    <div class="adv-header">
+      <div class="row">
+        <button class="back-btn" id="back-to-simple">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.75" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"></path></svg>
+          Simple
+        </button>
+        <div class="title">Advanced</div>
+        <span class="tag">optional</span>
+      </div>
+      <div class="hint">You don't need any of this for it to work. Changes save the moment you make them.</div>
+      <div class="tab-bar" id="tab-bar"></div>
+    </div>
+    <div class="page-body" id="page-body"></div>
+  </main>
+
+  <!-- ================= WIZARD ================= -->
+  <div id="wizard" class="view" hidden>
+    <div class="wiz-dots" id="wiz-dots"></div>
+    <div class="wiz-preview">
+      <svg viewBox="0 0 320 200" preserveAspectRatio="xMidYMid slice" id="wiz-svg">
+        <defs>
+          <filter id="wzGlow" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDeviation="10"></feGaussianBlur></filter>
+          <filter id="wzSoft" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDeviation="3"></feGaussianBlur></filter>
+          <linearGradient id="wzCeil" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#241c16"></stop><stop offset="1" stop-color="#14100c"></stop></linearGradient>
+          <linearGradient id="wzWall" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#171310"></stop><stop offset="1" stop-color="#0b0908"></stop></linearGradient>
+        </defs>
+        <rect width="320" height="200" fill="#0c0a08"></rect>
+        <polygon points="0,0 320,0 250,96 70,96" fill="url(#wzCeil)"></polygon>
+        <rect y="96" width="320" height="104" fill="url(#wzWall)"></rect>
+        <g filter="url(#wzGlow)">
+          <polygon id="wz-front" points="70,96 250,96 232,60 88,60" fill="transparent" opacity="0"></polygon>
+          <polygon id="wz-left" points="0,0 70,96 112,96 34,0" fill="transparent" opacity="0"></polygon>
+          <polygon id="wz-right" points="320,0 250,96 208,96 286,0" fill="transparent" opacity="0"></polygon>
+          <rect id="wz-back" x="0" y="-10" width="320" height="34" fill="transparent" opacity="0"></rect>
+        </g>
+        <g filter="url(#wzSoft)" stroke-linecap="round">
+          <line id="wz-front-ln" x1="70" y1="96" x2="250" y2="96" stroke="transparent" stroke-opacity="0" stroke-width="4"></line>
+          <line id="wz-left-ln" x1="0" y1="0" x2="70" y2="96" stroke="transparent" stroke-opacity="0" stroke-width="4"></line>
+          <line id="wz-right-ln" x1="320" y1="0" x2="250" y2="96" stroke="transparent" stroke-opacity="0" stroke-width="4"></line>
+          <line id="wz-back-ln" x1="0" y1="3" x2="320" y2="3" stroke="transparent" stroke-opacity="0" stroke-width="5"></line>
+        </g>
+        <rect x="116" y="112" width="88" height="52" rx="3" fill="#241d19"></rect>
+        <rect x="116" y="112" width="88" height="52" rx="3" fill="none" stroke="rgba(255,255,255,.13)"></rect>
+        <text x="160" y="142" text-anchor="middle" font-size="8" letter-spacing="1.6" fill="rgba(255,255,255,.4)" font-family="Figtree, sans-serif">TV</text>
+        <g filter="url(#wzSoft)" id="wz-chase"></g>
+      </svg>
+      <div class="dusk-caption" id="dusk-caption" hidden></div>
+    </div>
+    <div class="wiz-body" id="wiz-body"></div>
+    <div class="wiz-footer">
+      <button class="wiz-back" id="wiz-back">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.75" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"></path></svg>
+      </button>
+      <button class="wiz-skip" id="wiz-skip" hidden>Skip</button>
+      <button class="wiz-next" id="wiz-next">Next</button>
+    </div>
+  </div>
+
+  <div id="toast" hidden></div>
+
+  <div id="confirm-overlay" hidden>
+    <div class="confirm-box">
+      <div class="title" id="confirm-title"></div>
+      <div class="body" id="confirm-body"></div>
+      <div class="actions">
+        <button class="pill-btn" id="confirm-cancel" style="flex:1">Cancel</button>
+        <button class="cta-btn" id="confirm-ok" style="flex:1"></button>
+      </div>
+    </div>
+  </div>
+
+  <input type="file" id="import-file" accept="application/json" hidden>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,13 @@
+services:
+  ambiwled:
+    build: .
+    image: ambiwled:latest
+    container_name: ambiwled
+    restart: unless-stopped
+    # Bridge networking is enough: outbound UDP works, only the UI needs mapping.
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./config:/config
+    environment:
+      - AMBIWLED_CONFIG_DIR=/config
