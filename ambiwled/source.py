@@ -25,9 +25,17 @@ class SourcePoller:
         cfg: dict[str, Any],
         on_frame: Callable[[np.ndarray, Layout], None],
         on_state: Callable[[str], None] | None = None,
+        should_poll_fast: Callable[[], bool] | None = None,
     ) -> None:
         self.on_frame = on_frame
         self.on_state = on_state
+        # Whether polling the TV right now can lead anywhere - None means
+        # "always poll fast", the standalone/test default. Bridge wires this
+        # to "mode is ambilight and some output target is reachable": with
+        # nothing able to consume it, polling the TV at full rate and running
+        # every frame through mapping/colour is pure waste, independent of
+        # whether the TV itself is perfectly reachable.
+        self.should_poll_fast = should_poll_fast
         self.session: aiohttp.ClientSession | None = None
         self._task: asyncio.Task | None = None
 
@@ -289,6 +297,15 @@ class SourcePoller:
                 continue
             if self.api_version is None:
                 await self._detect_api_version()
+
+            if self.should_poll_fast is not None and not self.should_poll_fast():
+                # Nothing downstream can use this right now (mode off/preset,
+                # or the output controller unreachable) - state just holds at
+                # its last known value; still checked periodically, slowly,
+                # so it can't go stale for long and polling resumes promptly
+                # once there is a reason to hurry again.
+                await asyncio.sleep(self.off_probe_interval)
+                continue
 
             interval = (1.0 / max(self.poll_hz, 0.1)) * self._backoff
             tick = time.monotonic()
