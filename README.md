@@ -30,6 +30,17 @@ runtime rather than hardcoded, it adapts to whatever your set reports.
 
 ## Quick start
 
+The published image ([`iaakki/ambiwled`](https://hub.docker.com/r/iaakki/ambiwled)
+on Docker Hub) is the fastest way to try it:
+
+```bash
+docker run -d -p 8080:8080 -v ambiwled_config:/config --name ambiwled iaakki/ambiwled
+xdg-open http://localhost:8080
+```
+
+To build from source instead — or to use `./probe.py`/`./tools/corner_test.py`,
+which aren't part of the image:
+
 ```bash
 git clone https://github.com/iaakki/AmbiWLED.git && cd AmbiWLED
 
