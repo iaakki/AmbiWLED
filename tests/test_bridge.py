@@ -151,6 +151,15 @@ def test_identify_by_name_lights_only_part_of_its_own_edge(monkeypatch):
     """A comet, not a solid fill - and it must never spill past the edge's
     own pixel range into whatever is next to it."""
     import time as time_mod
+    # Mocked *before* identify() so identify_until is computed against the
+    # same fake clock the assertions read from - anchoring it to the real
+    # clock and mocking only afterwards is a real bug (not just theoretical:
+    # caught this by an actual CI failure), since real time.monotonic() has
+    # no guaranteed relationship to these small fixed values - it is often
+    # huge on a long-uptime dev machine, comfortably past identify_until by
+    # the time the mock takes over, but a freshly booted CI runner can have
+    # under 1000s of monotonic time, making the deadline look already past.
+    monkeypatch.setattr(time_mod, "monotonic", lambda: 1000.0)
     bridge = Bridge(config_mod.default_config())
     bridge.identify(edge="front", seconds=5.0)         # front: pixels 0..132
     monkeypatch.setattr(time_mod, "monotonic", lambda: 1000.2)
@@ -163,9 +172,9 @@ def test_identify_by_name_lights_only_part_of_its_own_edge(monkeypatch):
 
 def test_identify_chase_moves_over_time(monkeypatch):
     import time as time_mod
+    monkeypatch.setattr(time_mod, "monotonic", lambda: 1000.0)  # see the comment above
     bridge = Bridge(config_mod.default_config())
     bridge.identify(edge="front", seconds=5.0)
-    monkeypatch.setattr(time_mod, "monotonic", lambda: 1000.0)
     frame_a = bridge._identify_frame()
     monkeypatch.setattr(time_mod, "monotonic", lambda: 1000.8)
     frame_b = bridge._identify_frame()
@@ -176,6 +185,7 @@ def test_identify_chase_direction_follows_reversed(monkeypatch):
     """The whole point: flipping `reversed` must flip which way the comet
     runs, so pressing Identify after tapping Flip is the confirmation."""
     import time as time_mod
+    monkeypatch.setattr(time_mod, "monotonic", lambda: 1000.0)  # see the comment above
 
     def make(is_reversed):
         cfg = config_mod.default_config()
