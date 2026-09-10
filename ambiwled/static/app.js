@@ -366,13 +366,16 @@ function paintPreview(prefix) {
     if (poly) { poly.setAttribute('fill', colour); poly.setAttribute('opacity', opacity); }
     if (line) { line.setAttribute('stroke', colour); line.setAttribute('stroke-opacity', opacity); }
   }
-  if (prefix !== 'pv') return;
+  if (prefix !== 'pv' && prefix !== 'hm') return;
   // The "screen" rectangle used to be a fixed decorative gradient, always
   // showing the same bright blue/pink/orange regardless of what the TV was
   // actually doing - misleading right next to a caption that says "right
   // now". It's real data now: three samples off the front edge, the one
-  // that actually sits around the screen.
-  const stops = [$('#amTv-0'), $('#amTv-1'), $('#amTv-2')];
+  // that actually sits around the screen. Shared between the Simple view's
+  // own room preview ('pv') and the same graphic reused on Advanced > Home
+  // ('hm') - one canonical picture of "what's happening right now", not
+  // two different-looking ones.
+  const stops = [$(`#amTv-${prefix}-0`), $(`#amTv-${prefix}-1`), $(`#amTv-${prefix}-2`)];
   const sample = on ? edgeSampleColours('front', 3) : null;
   const off = '#26221e';
   for (let i = 0; i < stops.length; i++) {
@@ -382,17 +385,52 @@ function paintPreview(prefix) {
   // light spilling from the picture, so it has to actually be that light's
   // colour - a fixed amber blob glowing the same regardless of what's on
   // screen, dark scenes included, was the same kind of always-on fakery.
-  const bloom = $('#pv-bloom');
+  const bloom = $(`#${prefix}-bloom`);
   if (bloom) {
     const avg = on ? edgeAverageColour('front') : null;
     bloom.setAttribute('fill', avg || off);
     bloom.setAttribute('opacity', avg ? 0.5 : 0.15);
   }
 }
+
+/** The room-preview graphic, as markup: used once statically (Simple view,
+    prefix 'pv') and once generated here for Advanced > Home ('hm') - same
+    picture, not a second, different live view to keep in sync by hand.
+    The glow/gradient filters (amGlow, amSoft, amCeil, amWall) are shared,
+    defined once in the Simple view's copy; SVG resolves url(#id) against
+    the whole document, not just the nearest <svg>, so referencing them
+    from here without redefining them is fine. */
+function roomPreviewSvg(prefix) {
+  return `<svg viewBox="0 0 320 200" preserveAspectRatio="xMidYMid slice">
+    <defs>
+      <linearGradient id="amTv-${prefix}" x1="0" y1="0" x2="1" y2="1"><stop id="amTv-${prefix}-0" offset="0" stop-color="#26221e"></stop><stop id="amTv-${prefix}-1" offset="0.5" stop-color="#26221e"></stop><stop id="amTv-${prefix}-2" offset="1" stop-color="#26221e"></stop></linearGradient>
+    </defs>
+    <rect width="320" height="200" fill="#0c0a08"></rect>
+    <polygon points="0,0 320,0 250,96 70,96" fill="url(#amCeil)"></polygon>
+    <rect y="96" width="320" height="104" fill="url(#amWall)"></rect>
+    <g filter="url(#amGlow)">
+      <polygon id="${prefix}-front" points="70,96 250,96 232,60 88,60" fill="transparent" opacity="0"></polygon>
+      <polygon id="${prefix}-left" points="0,0 70,96 112,96 34,0" fill="transparent" opacity="0"></polygon>
+      <polygon id="${prefix}-right" points="320,0 250,96 208,96 286,0" fill="transparent" opacity="0"></polygon>
+      <rect id="${prefix}-back" x="0" y="-10" width="320" height="34" fill="transparent" opacity="0"></rect>
+      <ellipse id="${prefix}-bloom" cx="160" cy="150" rx="120" ry="46" fill="#26221e" opacity="0.5"></ellipse>
+    </g>
+    <g filter="url(#amSoft)" stroke-linecap="round">
+      <line id="${prefix}-front-ln" x1="70" y1="96" x2="250" y2="96" stroke="transparent" stroke-opacity="0" stroke-width="4"></line>
+      <line id="${prefix}-left-ln" x1="0" y1="0" x2="70" y2="96" stroke="transparent" stroke-opacity="0" stroke-width="4"></line>
+      <line id="${prefix}-right-ln" x1="320" y1="0" x2="250" y2="96" stroke="transparent" stroke-opacity="0" stroke-width="4"></line>
+      <line id="${prefix}-back-ln" x1="0" y1="3" x2="320" y2="3" stroke="transparent" stroke-opacity="0" stroke-width="5"></line>
+    </g>
+    <rect x="116" y="112" width="88" height="52" rx="3" fill="url(#amTv-${prefix})" opacity="0.92"></rect>
+    <rect x="116" y="112" width="88" height="52" rx="3" fill="none" stroke="rgba(255,255,255,.14)"></rect>
+    <text x="160" y="188" text-anchor="middle" font-size="8" letter-spacing="1.6" fill="rgba(255,255,255,.45)" font-family="Figtree, sans-serif">YOUR ROOM, RIGHT NOW</text>
+  </svg>`;
+}
 function renderPreviewFromPixels() {
   if (!cfg) return;
   paintPreview('pv');
   if (wiz) paintPreview('wz');
+  if (page === 'home' && advanced) paintPreview('hm');
   const veil = $('#preview-veil');
   if (veil) veil.style.opacity = get('mode') === 'off' ? 0.7 : 0;
 }
@@ -401,7 +439,6 @@ function renderPreviewFromPixels() {
 
 function renderLive() {
   renderPreviewFromPixels();
-  renderAmbientStrip();
   const on = get('mode') !== 'off';
   const emitting = !!metrics.emitting;
   const line = $('#status-line'), sub = $('#status-sub');
@@ -541,26 +578,21 @@ function renderPage() {
 
 function pageHome(body) {
   body.append(el('div', { class: 'page' },
-    el('div', { class: 'ambient-strip' },
-      el('div', { class: 'ambient-fill', id: 'ambient-fill' }),
-      el('div', { class: 'caption' }, 'live · one websocket')),
+    el('div', { class: 'preview', id: 'home-preview' }),
     el('div', { class: 'summary-list', id: 'summary-list' }),
     el('div', { class: 'field-hint' }, 'The preview keeps streaming while you move between these pages — one socket, never renegotiated.'),
     el('div', { style: 'height:1px;background:var(--color-divider)' }),
     el('div', {}, el('div', { class: 'section-title' }, 'Mode'), el('div', { id: 'mode-wrap' })),
   ));
+  // Same room graphic as the Simple view (roomPreviewSvg in app.js), not a
+  // second, different-looking live view - built with innerHTML rather than
+  // el(), which only ever creates HTML elements: SVG shapes need the SVG
+  // namespace, which the HTML parser applies correctly for inline <svg>
+  // markup parsed this way, but document.createElement('svg') does not.
+  $('#home-preview').innerHTML = roomPreviewSvg('hm');
   renderSummaryRows();
   renderModeSwitch();
-  renderAmbientStrip();
-}
-function renderAmbientStrip() {
-  const fill = $('#ambient-fill');
-  if (!fill) return;
-  const slots = presentSlots();
-  const colours = slots.length ? slots.map((s) => edgeAverageColour(s) || '#0c0a08') : ['#0c0a08'];
-  fill.style.background = colours.length > 1
-    ? `linear-gradient(90deg, ${colours.join(', ')})`
-    : colours[0];
+  paintPreview('hm');
 }
 function renderModeSwitch() {
   const wrap = $('#mode-wrap');

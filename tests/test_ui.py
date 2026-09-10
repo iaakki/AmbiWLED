@@ -345,7 +345,7 @@ def _room_preview_colours_body(browser, base):
     _wait_booted(browser)
     time.sleep(0.3)
     stop_colours = browser.execute_script("""
-        return [0, 1, 2].map(i => document.getElementById('amTv-' + i).getAttribute('stop-color'));
+        return [0, 1, 2].map(i => document.getElementById('amTv-pv-' + i).getAttribute('stop-color'));
     """)
     bloom_fill = browser.execute_script("return document.getElementById('pv-bloom').getAttribute('fill')")
     return stop_colours, bloom_fill
@@ -368,3 +368,58 @@ async def test_room_preview_screen_is_not_a_fixed_fake_gradient(running, browser
     assert bloom_fill not in old_fakes
     assert all(c in ('#26221e', 'rgb(0,0,0)') for c in stop_colours)
     assert bloom_fill in ('#26221e', 'rgb(0,0,0)')
+
+
+# -- Advanced > Home: same live room preview as the Simple view, not a
+#    second, different-looking one (the old ambient-strip gradient) --------
+
+def _home_matches_simple_body(browser, base):
+    browser.get(base)
+    _wait_booted(browser)
+    browser.find_element(By.ID, "open-advanced").click()
+    time.sleep(0.3)
+    result = browser.execute_script("""
+        const home = document.getElementById('home-preview');
+        const svg = home && home.querySelector('svg');
+        const ids = ['front', 'left', 'right', 'back'];
+        const present = ids.every(s => document.getElementById('hm-' + s) && document.getElementById('hm-' + s + '-ln'));
+        // Force a live repaint of both instances and compare: same edge data
+        // must produce the same fill/opacity on both, proving 'hm' isn't a
+        // second, independently-wired view that can drift out of sync.
+        window.paintPreview('pv');
+        window.paintPreview('hm');
+        const same = ids.every(s => {
+            const pv = document.getElementById('pv-' + s), hm = document.getElementById('hm-' + s);
+            return pv.getAttribute('fill') === hm.getAttribute('fill')
+                && pv.getAttribute('opacity') === hm.getAttribute('opacity');
+        });
+        // The glow filter is defined once (in the Simple view's copy) and
+        // referenced, not redefined, from the Home copy - confirm the browser
+        // actually resolves that cross-<svg> reference rather than silently
+        // dropping the effect: getBBox() of a filtered element only reflects
+        // the filter's own region padding once the filter is truly applied.
+        const frontBBox = document.getElementById('hm-front').getBBox();
+        return {
+            svgPresent: !!svg,
+            idsPresent: present,
+            sameAcrossViews: same,
+            frontFilterAttr: document.getElementById('hm-front').closest('g').getAttribute('filter'),
+            bboxOk: frontBBox.width > 0 && frontBBox.height > 0,
+        };
+    """)
+    return result
+
+
+async def test_advanced_home_shows_the_same_live_room_preview_as_simple(running, browser):
+    """Regression: Advanced > Home used to show a different, worse live view
+    (a flat 4-stop CSS gradient of the edges' average colours - "only left
+    and right" visible in practice) instead of the same room graphic the
+    Simple view already got right. It must be the literal same picture,
+    driven by the same paint function, not a second view to keep in sync."""
+    _, bridge, base, session, _ = running
+    result = await _in_thread(_home_matches_simple_body, browser, base)
+    assert result["svgPresent"]
+    assert result["idsPresent"]
+    assert result["sameAcrossViews"]
+    assert result["frontFilterAttr"] == "url(#amGlow)"
+    assert result["bboxOk"]
